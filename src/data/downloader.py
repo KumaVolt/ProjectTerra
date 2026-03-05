@@ -28,13 +28,13 @@ DATA_SOURCES = {
         "mix_ratio": 0.15,
         "description": "Mathematical web pages",
     },
-    "starcoderdata": {
-        "hf_name": "bigcode/starcoderdata",
-        "hf_subset": "python",
+    "python_code": {
+        "hf_name": "codeparrot/github-code-clean",
+        "hf_subset": "Python-all",
         "split": "train",
-        "text_field": "content",
+        "text_field": "code",
         "mix_ratio": 0.20,
-        "description": "Python code from StarCoder training data",
+        "description": "Clean Python code from GitHub",
     },
     "cosmopedia": {
         "hf_name": "HuggingFaceTB/cosmopedia",
@@ -244,5 +244,5 @@ def download_minimal_sample(
     return download_pretraining_data(
         output_dir=output_dir,
         max_samples_per_source=num_samples,
-        sources=["fineweb_edu", "starcoderdata"],
+        sources=["fineweb_edu", "python_code"],
     )
