@@ -373,8 +373,8 @@ def _runpod_check_status(state: dict) -> dict:
             return {"status": "not_found", "pod_id": pod_id}
 
         elapsed = time.time() - state.get("started_at", 0)
-        runtime = pod.get("runtime", {})
-        gpus = runtime.get("gpus", [{}])
+        runtime = pod.get("runtime") or {}
+        gpus = runtime.get("gpus") or []
         gpu_util = gpus[0].get("gpuUtilPercent", "N/A") if gpus else "N/A"
         mem_util = gpus[0].get("memoryUtilPercent", "N/A") if gpus else "N/A"
 
