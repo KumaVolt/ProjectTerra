@@ -1,0 +1,415 @@
+name: "Terra Evolution Cycle"
+
+on:
+  schedule:
+    - cron: "0 0,8,16 * * *"  # Every 8 hours
+
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Cycle mode"
+        required: false
+        default: "full"
+        type: choice
+        options:
+          - full
+          - research-only
+          - train-only
+          - evaluate-only
+          - fix-issue
+      gpu:
+        description: "GPU type for cloud training"
+        required: false
+        default: "A100"
+        type: choice
+        options:
+          - A100
+          - H100
+          - L4
+          - RTX4090
+      max_steps:
+        description: "Pre-training steps (0 = auto based on data)"
+        required: false
+        default: "0"
+        type: string
+      target_issue:
+        description: "Issue number (for fix-issue mode)"
+        required: false
+        type: string
+      dry_run:
+        description: "Dry run (no commits, no training)"
+        required: false
+        default: false
+        type: boolean
+
+  repository_dispatch:
+    types: [trigger-evolution-cycle]
+
+concurrency:
+  group: terra-evolution
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: read
+  actions: read
+
+env:
+  PYTHON_VERSION: "3.11"
+  SESSION_ID: ${{ github.run_id }}-${{ github.run_attempt }}
+
+jobs:
+  # ─── Job 1: TRIAGE & PLANNING ───
+  triage:
+    name: "Triage & Planning"
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      work_plan: ${{ steps.plan.outputs.work_plan }}
+      training_stage: ${{ steps.check_stage.outputs.stage }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install triage dependencies
+        run: pip install httpx pyyaml
+
+      - name: Check training stage
+        id: check_stage
+        run: |
+          STAGE=$(python3 -c "
+          import json
+          try:
+              state = json.load(open('configs/evolution_state.json'))
+              print(state.get('training_stage', 'pretrain'))
+          except: print('pretrain')
+          ")
+          echo "stage=$STAGE" >> "$GITHUB_OUTPUT"
+          echo "Current training stage: $STAGE"
+
+      - name: Gather context
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh issue list --state open \
+            --json number,title,labels,body,createdAt \
+            --limit 50 > /tmp/issues.json || echo "[]" > /tmp/issues.json
+
+          git log --oneline -20 --format='%H %s' > /tmp/recent_commits.txt
+
+          mkdir -p logs/sessions
+          find logs/sessions -name '*.json' -type f 2>/dev/null | \
+            sort -r | head -5 | xargs cat 2>/dev/null > /tmp/recent_sessions.json || \
+            echo "[]" > /tmp/recent_sessions.json
+
+      - name: Generate work plan
+        id: plan
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GLM_API_KEY: ${{ secrets.GLM_API_KEY }}
+          GLM_API_BASE: https://api.z.ai/v1
+          CYCLE_MODE: ${{ inputs.mode || 'full' }}
+          TARGET_ISSUE: ${{ inputs.target_issue || '' }}
+        run: python scripts/triage.py
+
+  # ─── Job 2: INITIALIZE (first run only) ───
+  initialize:
+    name: "Initialize Pipeline"
+    needs: triage
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    if: ${{ !contains(github.event.inputs.mode, 'evaluate') }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Cache pip packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('pyproject.toml') }}
+          restore-keys: ${{ runner.os }}-pip-
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Check if tokenizer exists
+        id: check_tokenizer
+        run: |
+          if [ -f "models/tokenizer/tokenizer.json" ]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Train tokenizer (first run)
+        if: steps.check_tokenizer.outputs.exists == 'false'
+        run: terra train-tokenizer --num-samples 100000
+
+      - name: Check if training data exists
+        id: check_data
+        run: |
+          if [ -f "data/pretrain_chunks/train.jsonl" ]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Download and prepare data (first run)
+        if: steps.check_data.outputs.exists == 'false'
+        run: |
+          terra download-data --max-samples 50000
+          terra prepare-data
+
+      - name: Configure git
+        run: |
+          git config user.name "ProjectTerra Bot"
+          git config user.email "terra-bot@users.noreply.github.com"
+
+      - name: Commit initialization artifacts
+        run: |
+          git add models/tokenizer/ data/ 2>/dev/null || true
+          git diff --cached --quiet || {
+            git commit -m "[terra-evolution] Initialize tokenizer and training data"
+            git pull --rebase origin main || true
+            git push
+          }
+
+      - name: Upload data artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: terra-data
+          path: |
+            models/tokenizer/
+            data/pretrain_chunks/
+            configs/
+            src/
+          retention-days: 7
+
+  # ─── Job 3: CLOUD GPU TRAINING ───
+  train:
+    name: "Cloud GPU Training"
+    needs: [triage, initialize]
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    if: ${{ needs.triage.outputs.training_stage == 'pretrain' && inputs.mode != 'research-only' && inputs.dry_run != 'true' }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Download initialization artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: terra-data
+          merge-multiple: true
+
+      - name: Launch cloud pre-training
+        env:
+          RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_REPO_ID: KumaVolt/terra-checkpoints
+        run: |
+          # Use async mode: pod trains, uploads to HF, self-destructs
+          terra cloud-train \
+            --async \
+            --gpu ${{ inputs.gpu || 'A100' }} \
+            --max-steps ${{ inputs.max_steps || '0' }} \
+            <<< "y"
+
+      - name: Wait for training and download
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_REPO_ID: KumaVolt/terra-checkpoints
+          RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
+        run: |
+          # Poll until training completes (pod uploads to HF then self-destructs)
+          echo "Waiting for cloud training to complete..."
+          for i in $(seq 1 120); do
+            sleep 60
+            STATUS=$(terra cloud-status 2>&1 || true)
+            echo "[$i min] $STATUS"
+            if echo "$STATUS" | grep -q "completed\|downloaded\|not_found"; then
+              echo "Training complete or pod self-destructed. Downloading from HF..."
+              terra cloud-download || true
+              break
+            fi
+          done
+
+      - name: Configure git
+        run: |
+          git config user.name "ProjectTerra Bot"
+          git config user.email "terra-bot@users.noreply.github.com"
+
+      - name: Update evolution state
+        run: |
+          python3 -c "
+          import json
+          state = json.load(open('configs/evolution_state.json'))
+          # Check if model was downloaded
+          import os
+          if os.path.exists('models/current/config.json'):
+              state['training_stage'] = 'finetune'
+              state['best_model_path'] = 'models/current'
+              print('Model downloaded! Switching to finetune stage.')
+          else:
+              print('No model yet, staying in pretrain stage.')
+          json.dump(state, open('configs/evolution_state.json', 'w'), indent=2)
+          "
+
+      - name: Commit training results
+        run: |
+          git add configs/evolution_state.json logs/ models/current/ 2>/dev/null || true
+          git diff --cached --quiet || {
+            git commit -m "[terra-evolution] Pre-training session ${{ env.SESSION_ID }}"
+            git pull --rebase origin main || true
+            git push
+          }
+
+  # ─── Job 4: EVOLUTION SESSION (research + finetune + eval) ───
+  evolve:
+    name: "Evolution Session"
+    needs: [triage, train]
+    if: always() && needs.triage.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Cache pip packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('pyproject.toml') }}
+          restore-keys: ${{ runner.os }}-pip-
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Configure git
+        run: |
+          git config user.name "ProjectTerra Bot"
+          git config user.email "terra-bot@users.noreply.github.com"
+
+      - name: Run evolution session
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GLM_API_KEY: ${{ secrets.GLM_API_KEY }}
+          GLM_API_BASE: https://api.z.ai/v1
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_REPO_ID: KumaVolt/terra-checkpoints
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          WORK_PLAN: ${{ needs.triage.outputs.work_plan }}
+          DRY_RUN: ${{ inputs.dry_run || 'false' }}
+        run: python scripts/run_evolution.py
+
+      - name: Commit session logs
+        if: ${{ inputs.dry_run != 'true' }}
+        run: |
+          git add logs/ configs/evolution_state.json data/generated/ 2>/dev/null || true
+          git diff --cached --quiet || {
+            git commit -m "[terra-evolution] Session ${{ env.SESSION_ID }}
+
+          Plan: ${{ needs.triage.outputs.work_plan && 'executed' || 'default' }}
+          Mode: ${{ inputs.mode || 'scheduled' }}"
+            git pull --rebase origin main || true
+            git push
+          }
+
+      - name: Comment on addressed issues
+        if: ${{ inputs.dry_run != 'true' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo '${{ needs.triage.outputs.work_plan }}' | \
+            python3 -c "
+          import sys, json
+          try:
+              plan = json.load(sys.stdin)
+              for issue_num in plan.get('issues_to_address', []):
+                  print(issue_num)
+          except: pass
+          " | while read -r num; do
+            gh issue comment "$num" --body "ProjectTerra Evolution Bot worked on this issue in session ${{ env.SESSION_ID }}. Check the session logs for details." 2>/dev/null || true
+          done
+
+      - name: Upload session artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: session-${{ env.SESSION_ID }}
+          path: |
+            logs/sessions/
+            logs/benchmarks/
+          retention-days: 30
+
+  # ─── Job 5: LOG ROTATION ───
+  cleanup:
+    name: "Log Rotation"
+    needs: evolve
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: github.event.schedule == '0 0 * * *'
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure git
+        run: |
+          git config user.name "ProjectTerra Bot"
+          git config user.email "terra-bot@users.noreply.github.com"
+
+      - name: Rotate old logs
+        run: |
+          cd logs/sessions 2>/dev/null && \
+            ls -t *.json 2>/dev/null | tail -n +91 | xargs rm -f 2>/dev/null || true
+          cd ../../logs/research 2>/dev/null && \
+            ls -t *.json 2>/dev/null | tail -n +31 | xargs rm -f 2>/dev/null || true
+
+      - name: Commit cleanup
+        run: |
+          git add -A logs/
+          git diff --cached --quiet || {
+            git commit -m "[terra-evolution] Log rotation"
+            git push
+          }

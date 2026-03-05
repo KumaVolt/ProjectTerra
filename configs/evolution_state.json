@@ -1,0 +1,14 @@
+{
+  "generation": 0,
+  "best_model_path": null,
+  "best_score": 0,
+  "total_sessions": 0,
+  "total_training_samples": 0,
+  "current_phase": 1,
+  "modalities_active": [
+    "text"
+  ],
+  "training_stage": "pretrain",
+  "pretrain_steps_completed": 0,
+  "base_model": "terra-150m (from scratch)"
+}

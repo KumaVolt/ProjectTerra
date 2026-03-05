@@ -1,0 +1,48 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+venv/
+.venv/
+
+# Models (too large for git)
+models/*.bin
+models/*.gguf
+models/*.safetensors
+models/*.pt
+models/*.onnx
+
+# Environment
+.env
+.env.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs (session logs are committed, but temp logs are not)
+logs/temp/
+*.log.tmp
+
+# Data artifacts (training data is downloaded, not committed)
+data/
+!data/.gitkeep
+
+# Runtime state
+configs/cloud_job.json
+.cloud_job.json
+
+# Model checkpoints (too large)
+models/checkpoints/
+models/current/

@@ -1,0 +1,22 @@
+[
+  {"instruction": "Explain the concept of recursion in programming with a practical example in Python."},
+  {"instruction": "Write a function to find all prime numbers up to N using the Sieve of Eratosthenes."},
+  {"instruction": "What causes seasons on Earth? Explain with a scientific perspective."},
+  {"instruction": "Solve step by step: A store offers 20% off, then an additional 15% off the sale price. What is the total discount percentage?"},
+  {"instruction": "Translate 'Knowledge is power' into Japanese, Arabic, and Hindi. Provide transliterations."},
+  {"instruction": "Write a SQL query to find the top 5 customers by total purchase amount, including their most recent order date."},
+  {"instruction": "Explain the difference between TCP and UDP. When would you use each?"},
+  {"instruction": "Debug this Python code and explain what's wrong: def fibonacci(n): return fibonacci(n-1) + fibonacci(n-2)"},
+  {"instruction": "Describe how a neural network learns through backpropagation in simple terms."},
+  {"instruction": "Write a regular expression that validates email addresses and explain each part."},
+  {"instruction": "What are the SOLID principles in software engineering? Give an example of each."},
+  {"instruction": "Explain quantum entanglement as if you were talking to a 10-year-old."},
+  {"instruction": "Write a Python class that implements a thread-safe singleton pattern."},
+  {"instruction": "Compare and contrast REST and GraphQL APIs with pros and cons of each."},
+  {"instruction": "Solve: If you flip a fair coin 10 times, what's the probability of getting exactly 7 heads?"},
+  {"instruction": "Write a bash script that monitors disk usage and sends an alert when usage exceeds 90%."},
+  {"instruction": "Explain how HTTPS works, including the TLS handshake process."},
+  {"instruction": "Implement a binary search tree in Python with insert, search, and delete operations."},
+  {"instruction": "What were the main causes of World War I? Analyze from multiple perspectives."},
+  {"instruction": "Write a React component that implements an infinite scroll list with virtualization."}
+]

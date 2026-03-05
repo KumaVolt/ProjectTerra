@@ -1,0 +1,24 @@
+{
+  "vocab_size": 32000,
+  "special_tokens": {
+    "<|pad|>": 0,
+    "<|bos|>": 1,
+    "<|eos|>": 2,
+    "<|unk|>": 3,
+    "<|im_start|>": 4,
+    "<|im_end|>": 5,
+    "<|system|>": 6,
+    "<|user|>": 7,
+    "<|assistant|>": 8,
+    "<|code|>": 9,
+    "<|/code|>": 10,
+    "<|image|>": 11,
+    "<|audio|>": 12,
+    "<|think|>": 13,
+    "<|/think|>": 14
+  },
+  "pad_token": "<|pad|>",
+  "bos_token": "<|bos|>",
+  "eos_token": "<|eos|>",
+  "unk_token": "<|unk|>"
+}

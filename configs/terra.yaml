@@ -1,0 +1,190 @@
+# ProjectTerra Configuration
+# Self-evolving multimodal LLM - trained from scratch
+
+project:
+  name: "ProjectTerra"
+  version: "0.2.0"
+
+# The model ProjectTerra is building FROM SCRATCH
+model:
+  name: "terra"
+  # Target quantization for deployment
+  quantization: "Q4_K_M"
+  # Max memory budget (iPhone 15 = ~6GB, MacBook Air = 8-24GB)
+  max_memory_mb: 4096
+  # Modalities to support (added incrementally)
+  modalities:
+    - text
+    - vision
+    - speech_to_text
+    - text_to_speech
+  # Target context length
+  context_length: 8192
+  # When the terra model's benchmark score exceeds this threshold,
+  # start using it for self-evaluation and data generation alongside external LLMs
+  self_hosting_threshold: 0.65
+
+# Custom architecture (trained from scratch, NOT fine-tuned from existing model)
+architecture:
+  # Start with 150M, scale up as we prove the pipeline works
+  preset: "terra_150m"
+  vocab_size: 32000
+  hidden_size: 896
+  intermediate_size: 2432
+  num_hidden_layers: 12
+  num_attention_heads: 14
+  num_key_value_heads: 2  # GQA for memory efficiency
+  max_position_embeddings: 8192
+  rope_theta: 500000.0
+  rms_norm_eps: 1.0e-6
+  tie_word_embeddings: true
+  tokenizer_path: "models/tokenizer"
+
+# Multimodal encoders/decoders (all train in parallel with text backbone)
+multimodal:
+  vision:
+    enabled: true
+    preset: "vision_small"  # vision_tiny (3.8M), vision_small (23M), vision_base (86M)
+    image_size: 384
+    patch_size: 16
+    hidden_size: 384
+    num_hidden_layers: 12
+    num_attention_heads: 6
+    # projection_size is auto-set to match architecture.hidden_size
+
+  audio_encoder:  # Speech-to-Text
+    enabled: true
+    preset: "audio_small"  # audio_tiny (5M), audio_small (14M), audio_base (60M)
+    num_mel_bins: 80
+    hidden_size: 256
+    num_hidden_layers: 6
+    num_attention_heads: 4
+
+  speech_decoder:  # Text-to-Speech
+    enabled: true
+    preset: "speech_small"  # speech_tiny (3M), speech_small (12M)
+    codebook_size: 1024
+    num_codebooks: 4
+    hidden_size: 256
+
+  image_generator:  # Text-to-Image (latent diffusion)
+    enabled: true
+    preset: "gen_small"  # gen_tiny (10M, 64x64), gen_small (60M, 256x256), gen_base (80M, 512x512)
+    image_size: 256
+    latent_channels: 4
+    unet_channels: 128
+    # Fast generation: use consistency distillation for 1-4 step generation
+    fast_mode: true
+    default_steps: 4  # 1-4 for fast mode, 20-50 for standard
+
+# External LLM resources for research/distillation
+# Either or both can be used. At least one is required.
+llm_resources:
+  claude:  # Optional: set ANTHROPIC_API_KEY to enable
+    model: "claude-sonnet-4-20250514"
+    max_tokens_per_session: 100000
+    tasks:
+      - research
+      - data_generation
+      - evaluation
+      - code_review
+  glm:  # Optional: set GLM_API_KEY to enable
+    base_url: "https://api.z.ai/v1"
+    model: "glm-4-plus"
+    max_tokens_per_session: 100000
+    tasks:
+      - research
+      - data_generation
+      - evaluation
+      - code_review
+
+# Evolution pipeline
+evolution:
+  # How often to run (GitHub Actions cron)
+  schedule: "0 */8 * * *"
+  # Max duration per session (minutes)
+  max_session_duration: 120
+  # Pipeline stages (executed in order)
+  stages:
+    - check_issues
+    - plan_session
+    - research
+    - generate_data
+    - train
+    - evaluate
+    - log_and_commit
+
+# Training configuration
+training:
+  # Pre-training from scratch settings
+  pretrain:
+    data_path: "data/pretrain_chunks"
+    batch_size: 4
+    gradient_accumulation_steps: 8
+    learning_rate: 3.0e-4
+    weight_decay: 0.1
+    max_steps_per_session: 0  # 0 = auto (3 epochs over data, capped at 4, with early stopping)
+    warmup_steps: 200
+    save_steps: 500
+    gradient_checkpointing: true
+
+  # Fine-tuning settings (QLoRA, used after pre-training is done)
+  method: "qlora"
+  lora_r: 16
+  lora_alpha: 32
+  lora_dropout: 0.05
+  learning_rate: 2.0e-4
+  batch_size: 4
+  gradient_accumulation_steps: 4
+  max_steps: 500
+  warmup_steps: 50
+  save_steps: 100
+
+# Evaluation benchmarks
+evaluation:
+  benchmarks:
+    - name: "mmlu"
+      weight: 0.2
+    - name: "arc_challenge"
+      weight: 0.15
+    - name: "hellaswag"
+      weight: 0.15
+    - name: "gsm8k"
+      weight: 0.2
+    - name: "humaneval"
+      weight: 0.2
+    - name: "truthfulqa"
+      weight: 0.1
+  # Minimum improvement threshold to accept a new model version
+  min_improvement: 0.005
+  # Run quick eval (subset) or full eval
+  quick_eval_samples: 100
+
+# Data generation
+data:
+  # Pre-training data sources (downloaded from HuggingFace)
+  pretrain_sources:
+    - "fineweb_edu"
+    - "openwebmath"
+    - "the_stack_smol"
+    - "cosmopedia"
+    - "slim_orca"
+  # Synthetic data for fine-tuning (via external LLMs)
+  sources:
+    - type: "distillation"
+      teacher: "claude"
+      domains: ["reasoning", "coding", "math", "science", "multilingual"]
+    - type: "self_instruct"
+      seed_tasks: "configs/seed_tasks.json"
+    - type: "evol_instruct"
+      complexity_levels: [1, 2, 3, 4, 5]
+  # Quality filtering
+  min_quality_score: 0.7
+  max_samples_per_session: 1000
+
+# Logging
+logging:
+  session_log_dir: "logs/sessions"
+  format: "json"
+  commit_logs: true
+  commit_message_prefix: "[terra-evolution]"
