@@ -29,12 +29,12 @@ DATA_SOURCES = {
         "description": "Mathematical web pages",
     },
     "python_code": {
-        "hf_name": "codeparrot/github-code-clean",
-        "hf_subset": "Python-all",
+        "hf_name": "Nan-Do/code-search-net-python",
+        "hf_subset": None,
         "split": "train",
         "text_field": "code",
         "mix_ratio": 0.20,
-        "description": "Clean Python code from GitHub",
+        "description": "Python code from CodeSearchNet",
     },
     "cosmopedia": {
         "hf_name": "HuggingFaceTB/cosmopedia",
