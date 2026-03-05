@@ -38,7 +38,7 @@ Image generation uses consistency distillation for **1-4 step generation** (24x 
 
 ```bash
 # Clone and install
-git clone https://github.com/YOUR_USERNAME/ProjectTerra.git
+git clone https://github.com/KumaVolt/ProjectTerra.git
 cd ProjectTerra
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[multimodal]"
