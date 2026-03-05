@@ -32,6 +32,7 @@ def main():
         subprocess.run(["git", "clone", repo_url, "/workspace/terra"], check=True)
 
     os.chdir("/workspace/terra")
+    sys.path.insert(0, "/workspace/terra")
 
     # Install
     print("Installing dependencies...")
