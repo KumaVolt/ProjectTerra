@@ -35,9 +35,8 @@ Thumbs.db
 logs/temp/
 *.log.tmp
 
-# Data artifacts (training data is downloaded, not committed)
-data/
-!data/.gitkeep
+# Training data (downloaded at runtime, not committed)
+/data/
 
 # Runtime state
 configs/cloud_job.json
