@@ -28,17 +28,17 @@ DATA_SOURCES = {
         "mix_ratio": 0.15,
         "description": "Mathematical web pages",
     },
-    "the_stack_smol": {
-        "hf_name": "bigcode/the-stack-smol",
-        "hf_subset": "data",
+    "starcoderdata": {
+        "hf_name": "bigcode/starcoderdata",
+        "hf_subset": "python",
         "split": "train",
         "text_field": "content",
         "mix_ratio": 0.20,
-        "description": "Curated code from The Stack",
+        "description": "Python code from StarCoder training data",
     },
     "cosmopedia": {
         "hf_name": "HuggingFaceTB/cosmopedia",
-        "hf_subset": None,
+        "hf_subset": "web_samples_v2",
         "split": "train",
         "text_field": "text",
         "mix_ratio": 0.15,
@@ -48,7 +48,7 @@ DATA_SOURCES = {
         "hf_name": "Open-Orca/SlimOrca",
         "hf_subset": None,
         "split": "train",
-        "text_field": None,  # instruction/response format
+        "text_field": None,  # conversation format
         "mix_ratio": 0.10,
         "description": "Instruction-following data",
     },
@@ -130,8 +130,22 @@ def _extract_text(example: dict, source_info: dict) -> str:
     if text_field:
         return example.get(text_field, "")
 
-    # Instruction-response format (SlimOrca, etc.)
+    # Conversation format (SlimOrca uses "conversations" list)
     parts = []
+
+    # Try "conversations" field first (SlimOrca format)
+    conversations = example.get("conversations", [])
+    if conversations:
+        role_map = {"system": "<|system|>", "human": "<|user|>", "gpt": "<|assistant|>",
+                    "user": "<|user|>", "assistant": "<|assistant|>"}
+        for turn in conversations:
+            role = role_map.get(turn.get("from", ""), "")
+            value = turn.get("value", "")
+            if role and value:
+                parts.append(f"{role}\n{value}")
+        return "\n".join(parts)
+
+    # Fallback: instruction/response fields
     if "system_prompt" in example and example["system_prompt"]:
         parts.append(f"<|system|>\n{example['system_prompt']}")
     if "question" in example:
@@ -230,5 +244,5 @@ def download_minimal_sample(
     return download_pretraining_data(
         output_dir=output_dir,
         max_samples_per_source=num_samples,
-        sources=["fineweb_edu", "the_stack_smol"],
+        sources=["fineweb_edu", "starcoderdata"],
     )
