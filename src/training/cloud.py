@@ -266,7 +266,7 @@ def _runpod_pretrain(
     # The pytorch image entrypoint execs its arguments directly (not via sh -c),
     # so we must explicitly invoke bash -c with the full command as one arg.
     # Using env var REPO_URL avoids URL characters in the dockerArgs string.
-    docker_args = "bash -c 'cd /workspace && git clone $REPO_URL terra && cd terra && python scripts/cloud_train.py'"
+    docker_args = "bash -c 'cd /workspace && (git clone $REPO_URL terra 2>/dev/null || cd terra && git pull) && cd terra && python scripts/cloud_train.py'"
 
     variables = {
         "input": {
