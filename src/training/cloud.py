@@ -271,8 +271,8 @@ def _runpod_pretrain(
             "imageName": "runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04",
             "gpuTypeId": gpu_id,
             "gpuCount": 1,
-            "volumeInGb": 50,
-            "containerDiskInGb": 20,
+            "volumeInGb": 0,
+            "containerDiskInGb": 50,
             "minVcpuCount": 1,
             "minMemoryInGb": 1,
             "dockerArgs": boot_cmd,
@@ -293,9 +293,6 @@ def _runpod_pretrain(
         timeout=30,
     )
     result = resp.json()
-
-    if "errors" in result:
-        raise RuntimeError(f"RunPod API error: {result['errors']}")
 
     if "errors" in result:
         raise RuntimeError(f"RunPod API error: {result['errors']}")
