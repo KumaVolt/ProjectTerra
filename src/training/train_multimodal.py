@@ -540,7 +540,9 @@ def train_multimodal(
     text_model = TerraForCausalLM.from_pretrained(text_model_path, device=str(device))
 
     # Load tokenizers (try best, fall back to final)
-    def _resolve_tok_path(base: str) -> str | None:
+    def _resolve_tok_path(base: str | None) -> str | None:
+        if base is None:
+            return None
         for suffix in ["", "/best", "/final"]:
             p = base.rstrip("/") + suffix if suffix else base
             if Path(p).exists() and any(Path(p).glob("*_config.json")):

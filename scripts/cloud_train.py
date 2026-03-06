@@ -338,53 +338,87 @@ def run_multimodal(max_steps: int) -> dict:
 
     # 2. Download multimodal data — each modality separately so one failure doesn't kill all
     print("[multimodal] Step 2/5: Downloading multimodal data...", flush=True)
-    # Install audio codec support (needed for TTS data on cloud)
+    # Install FFmpeg + audio codec support (torchcodec needs libavutil)
+    subprocess.run(["apt-get", "update", "-qq"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    subprocess.run(["apt-get", "install", "-y", "-qq", "ffmpeg"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     subprocess.run([sys.executable, "-m", "pip", "install", "torchcodec", "soundfile", "--quiet"])
-    for modality, code in [
-        ("vision", "from src.data.multimodal_downloader import download_vision_data; download_vision_data(max_samples=1000, minimal=True)"),
-        ("audio/tts", "from src.data.multimodal_downloader import download_tts_data; download_tts_data(max_samples=2000, minimal=True)"),
+
+    has_vision = False
+    has_audio = False
+    for modality, code, flag_name in [
+        ("vision", "from src.data.multimodal_downloader import download_vision_data; download_vision_data(max_samples=1000, minimal=True)", "vision"),
+        ("audio/tts", "from src.data.multimodal_downloader import download_tts_data; download_tts_data(max_samples=2000, minimal=True)", "audio"),
     ]:
         print(f"[multimodal]   Downloading {modality}...", flush=True)
         result = subprocess.run([sys.executable, "-c", code])
         if result.returncode != 0:
             print(f"[multimodal]   WARNING: {modality} download failed (code {result.returncode}), continuing...", flush=True)
-    print("[multimodal] Data download complete.", flush=True)
+        elif flag_name == "vision":
+            has_vision = True
+        elif flag_name == "audio":
+            has_audio = True
+
+    # Check if data actually exists on disk (download may "succeed" but produce nothing)
+    has_vision = has_vision or os.path.isdir("data/vision")
+    has_audio = has_audio or os.path.exists("data/tts/manifest.jsonl")
+    print(f"[multimodal] Data: vision={has_vision}, audio={has_audio}", flush=True)
 
     # 3. Train image tokenizer
-    print("[multimodal] Step 3/5: Training image tokenizer...", flush=True)
-    from src.training.train_multimodal import train_image_tokenizer
-    img_result = train_image_tokenizer(
-        data_dir="data/vision",
-        output_dir="models/checkpoints/image_tokenizer",
-        batch_size=32,
-        max_steps=5000,
-    )
-    print(f"[multimodal] Image tokenizer done: {img_result.get('total_steps')} steps", flush=True)
-    # Upload immediately so we don't lose it if later steps fail
-    _incremental_upload("models/checkpoints/image_tokenizer", "image-tokenizer", "image tokenizer")
+    img_tok_path = None
+    if has_vision:
+        print("[multimodal] Step 3/5: Training image tokenizer...", flush=True)
+        from src.training.train_multimodal import train_image_tokenizer
+        img_result = train_image_tokenizer(
+            data_dir="data/vision",
+            output_dir="models/checkpoints/image_tokenizer",
+            batch_size=32,
+            max_steps=5000,
+        )
+        print(f"[multimodal] Image tokenizer done: {img_result.get('total_steps')} steps", flush=True)
+        _incremental_upload("models/checkpoints/image_tokenizer", "image-tokenizer", "image tokenizer")
+        # Resolve actual path (best or final)
+        for p in ["models/checkpoints/image_tokenizer/best", "models/checkpoints/image_tokenizer/final"]:
+            if os.path.isdir(p):
+                img_tok_path = p
+                break
+    else:
+        print("[multimodal] Step 3/5: SKIPPED (no vision data)", flush=True)
 
     # 4. Train audio tokenizer
-    print("[multimodal] Step 4/5: Training audio tokenizer...", flush=True)
-    from src.training.train_multimodal import train_audio_tokenizer
-    audio_result = train_audio_tokenizer(
-        data_dir="data/tts",
-        output_dir="models/checkpoints/audio_tokenizer",
-        batch_size=16,
-        max_steps=3000,
-    )
-    print(f"[multimodal] Audio tokenizer done: {audio_result.get('total_steps')} steps", flush=True)
-    _incremental_upload("models/checkpoints/audio_tokenizer", "audio-tokenizer", "audio tokenizer")
+    audio_tok_path = None
+    if has_audio:
+        print("[multimodal] Step 4/5: Training audio tokenizer...", flush=True)
+        from src.training.train_multimodal import train_audio_tokenizer
+        audio_result = train_audio_tokenizer(
+            data_dir="data/tts",
+            output_dir="models/checkpoints/audio_tokenizer",
+            batch_size=16,
+            max_steps=3000,
+        )
+        print(f"[multimodal] Audio tokenizer done: {audio_result.get('total_steps')} steps", flush=True)
+        _incremental_upload("models/checkpoints/audio_tokenizer", "audio-tokenizer", "audio tokenizer")
+        for p in ["models/checkpoints/audio_tokenizer/best", "models/checkpoints/audio_tokenizer/final"]:
+            if os.path.isdir(p):
+                audio_tok_path = p
+                break
+    else:
+        print("[multimodal] Step 4/5: SKIPPED (no audio data)", flush=True)
+
+    if not img_tok_path and not audio_tok_path:
+        print("[multimodal] ERROR: No tokenizers trained, cannot proceed to fine-tuning", flush=True)
+        return {"error": "no_tokenizers", "total_steps": 0}
 
     # 5. Multimodal fine-tuning
     mm_steps = max_steps if max_steps > 0 else 10000
     print(f"[multimodal] Step 5/5: Multimodal fine-tuning ({mm_steps} steps)...", flush=True)
+    print(f"[multimodal]   image_tok={img_tok_path}, audio_tok={audio_tok_path}", flush=True)
     from src.training.train_multimodal import train_multimodal
     result = train_multimodal(
         text_model_path=base_model_path,
-        image_tokenizer_path="models/checkpoints/image_tokenizer/best",
-        audio_tokenizer_path="models/checkpoints/audio_tokenizer/best",
-        vision_dir="data/vision",
-        audio_dir="data/tts",
+        image_tokenizer_path=img_tok_path,
+        audio_tokenizer_path=audio_tok_path,
+        vision_dir="data/vision" if has_vision else None,
+        audio_dir="data/tts" if has_audio else None,
         output_dir="models/checkpoints/multimodal",
         batch_size=16,
         gradient_accumulation_steps=2,
