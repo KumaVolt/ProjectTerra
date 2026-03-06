@@ -22,24 +22,24 @@ from datasets import load_dataset
 # ── Vision Data (image-text pairs) ──
 
 VISION_SOURCES = {
-    "cc3m_conceptual_captions": {
-        "hf_name": "pixparse/cc3m-wds",
-        "split": "train",
-        "image_field": "jpg",
-        "caption_field": "txt",
-        "description": "Conceptual Captions 3M — image-alt text pairs from the web",
+    "flickr8k": {
+        "hf_name": "jxie/flickr8k",
+        "split": "test",
+        "image_field": "image",
+        "caption_field": "caption_0",
+        "description": "Flickr8k — 8K images with 5 human captions each",
     },
     "coco_captions": {
-        "hf_name": "HuggingFaceM4/COCO",
+        "hf_name": "Multimodal-Fatima/COCO_captions_train",
         "split": "train",
         "image_field": "image",
-        "caption_field": "sentences_raw",
-        "description": "COCO Captions — 330K images with 5 human captions each",
+        "caption_field": "sentences",
+        "description": "COCO Captions — 330K images with human captions",
     },
 }
 
 VISION_SOURCES_MINIMAL = {
-    "coco_captions": VISION_SOURCES["coco_captions"],
+    "flickr8k": VISION_SOURCES["flickr8k"],
 }
 
 
@@ -159,20 +159,19 @@ def _extract_caption(example: dict, info: dict) -> str:
 # ── Image Generation Data ──
 
 IMAGE_GEN_SOURCES = {
-    "laion_aesthetics": {
-        "hf_name": "laion/laion-art",
+    "laion_art": {
+        "hf_name": "fantasyfish/laion-art",
         "split": "train",
         "image_field": "image",
-        "caption_field": "TEXT",
-        "description": "LAION Aesthetics — high-quality aesthetic images with captions",
+        "caption_field": "text",
+        "description": "LAION Art — aesthetic images with captions",
     },
-    "diffusiondb": {
-        "hf_name": "poloclub/diffusiondb",
-        "hf_subset": "random_1k",
+    "naruto_captions": {
+        "hf_name": "lambdalabs/naruto-blip-captions",
         "split": "train",
         "image_field": "image",
-        "caption_field": "prompt",
-        "description": "DiffusionDB — Stable Diffusion generations with prompts (learn prompt→image mapping)",
+        "caption_field": "text",
+        "description": "Naruto BLIP captions — anime images with captions (style training)",
     },
 }
 
@@ -198,7 +197,7 @@ def download_image_gen_data(
         transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),  # [-1, 1] for diffusion
     ])
 
-    sources = {"diffusiondb": IMAGE_GEN_SOURCES["diffusiondb"]} if minimal else IMAGE_GEN_SOURCES
+    sources = {"naruto_captions": IMAGE_GEN_SOURCES["naruto_captions"]} if minimal else IMAGE_GEN_SOURCES
     total_saved = 0
 
     captions_file = out / "captions.jsonl"
@@ -264,7 +263,7 @@ def download_image_gen_data(
 
 AUDIO_SOURCES = {
     "librispeech_clean": {
-        "hf_name": "librispeech_asr",
+        "hf_name": "openslr/librispeech_asr",
         "hf_subset": "clean",
         "split": "train.100",
         "audio_field": "audio",
@@ -328,11 +327,7 @@ def download_audio_data(
                             continue
 
                         # Extract audio array and sample rate
-                        if isinstance(audio_data, dict):
-                            array = audio_data.get("array")
-                            sr = audio_data.get("sampling_rate", target_sr)
-                        else:
-                            continue
+                        array, sr = _extract_audio(audio_data, target_sr)
 
                         if array is None or len(array) < 1600:  # < 0.1s
                             continue
@@ -341,10 +336,13 @@ def download_audio_data(
 
                         # Resample if needed
                         if sr != target_sr:
-                            import torchaudio
-                            audio_tensor = torchaudio.functional.resample(
-                                audio_tensor.unsqueeze(0), sr, target_sr
-                            ).squeeze(0)
+                            try:
+                                import torchaudio
+                                audio_tensor = torchaudio.functional.resample(
+                                    audio_tensor.unsqueeze(0), sr, target_sr
+                                ).squeeze(0)
+                            except ImportError:
+                                continue
 
                         # Compute mel spectrogram
                         mel = _compute_mel(audio_tensor, target_sr)
@@ -378,6 +376,41 @@ def download_audio_data(
     total_hours = _count_hours(manifest_file)
     print(f"[audio] Total: {total_saved} samples ({total_hours:.1f}h) saved to {out}")
     return {"total": total_saved, "hours": total_hours, "manifest": str(manifest_file), "mels": str(mels_dir)}
+
+
+def _extract_audio(audio_data, default_sr: int = 16000) -> tuple:
+    """Extract audio array and sample rate from various HF dataset formats.
+
+    Handles both dict format and AudioDecoder objects.
+    Returns (numpy_array, sample_rate) or (None, default_sr) on failure.
+    """
+    import numpy as np
+
+    if isinstance(audio_data, dict):
+        array = audio_data.get("array")
+        sr = audio_data.get("sampling_rate", default_sr)
+        if array is not None:
+            if not isinstance(array, np.ndarray):
+                array = np.array(array, dtype=np.float32)
+            return array, sr
+        return None, default_sr
+
+    # AudioDecoder object (newer HF datasets)
+    try:
+        array = audio_data["array"]
+        sr = audio_data.get("sampling_rate", default_sr) if hasattr(audio_data, "get") else default_sr
+        # Try to get sample rate from metadata
+        if hasattr(audio_data, "metadata"):
+            meta = audio_data.metadata
+            if hasattr(meta, "sample_rate"):
+                sr = meta.sample_rate
+        if not isinstance(array, np.ndarray):
+            array = np.array(array, dtype=np.float32)
+        return array, sr
+    except Exception:
+        pass
+
+    return None, default_sr
 
 
 def _compute_mel(
@@ -437,15 +470,8 @@ def _count_hours(manifest_path: Path) -> float:
 # ── TTS Data (same audio but optimized for speech synthesis) ──
 
 TTS_SOURCES = {
-    "ljspeech": {
-        "hf_name": "keithito/lj_speech",
-        "split": "train",
-        "audio_field": "audio",
-        "text_field": "normalized_text",
-        "description": "LJ Speech — 24h single-speaker English (clean, ideal for TTS)",
-    },
     "libritts_clean": {
-        "hf_name": "cdminix/libritts-r-aligned",
+        "hf_name": "blabble-io/libritts_r",
         "hf_subset": "clean",
         "split": "train.clean.100",
         "audio_field": "audio",
@@ -468,7 +494,7 @@ def download_tts_data(
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
 
-    sources = {"ljspeech": TTS_SOURCES["ljspeech"]} if minimal else TTS_SOURCES
+    sources = {"libritts_clean": TTS_SOURCES["libritts_clean"]} if minimal else TTS_SOURCES
     total_saved = 0
 
     manifest_file = out / "manifest.jsonl"
@@ -498,11 +524,7 @@ def download_tts_data(
                         if audio_data is None or not text:
                             continue
 
-                        if isinstance(audio_data, dict):
-                            array = audio_data.get("array")
-                            sr = audio_data.get("sampling_rate", target_sr)
-                        else:
-                            continue
+                        array, sr = _extract_audio(audio_data, target_sr)
 
                         if array is None or len(array) < 4800:  # < 0.2s
                             continue
@@ -510,10 +532,13 @@ def download_tts_data(
                         audio_tensor = torch.tensor(array, dtype=torch.float32)
 
                         if sr != target_sr:
-                            import torchaudio
-                            audio_tensor = torchaudio.functional.resample(
-                                audio_tensor.unsqueeze(0), sr, target_sr
-                            ).squeeze(0)
+                            try:
+                                import torchaudio
+                                audio_tensor = torchaudio.functional.resample(
+                                    audio_tensor.unsqueeze(0), sr, target_sr
+                                ).squeeze(0)
+                            except ImportError:
+                                continue
 
                         mel = _compute_mel(audio_tensor, target_sr, n_fft=1024, hop_length=256, n_mels=80)
 

@@ -312,8 +312,9 @@ class TerraForCausalLM(nn.Module):
         temperature: float = 0.7,
         top_p: float = 0.9,
         top_k: int = 50,
+        repetition_penalty: float = 1.2,
     ) -> torch.Tensor:
-        """Simple autoregressive generation."""
+        """Simple autoregressive generation with repetition penalty."""
         self.eval()
         with torch.no_grad():
             for _ in range(max_new_tokens):
@@ -321,6 +322,14 @@ class TerraForCausalLM(nn.Module):
                 idx_cond = input_ids[:, -self.config.max_position_embeddings:]
                 output = self.forward(idx_cond)
                 logits = output["logits"][:, -1, :]
+
+                # Repetition penalty: reduce score of tokens already generated
+                if repetition_penalty != 1.0:
+                    for token_id in set(input_ids[0].tolist()):
+                        if logits[0, token_id] > 0:
+                            logits[0, token_id] /= repetition_penalty
+                        else:
+                            logits[0, token_id] *= repetition_penalty
 
                 if temperature > 0:
                     logits = logits / temperature

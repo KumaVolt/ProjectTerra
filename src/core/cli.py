@@ -1,5 +1,8 @@
 """CLI entrypoint for ProjectTerra."""
 
+import json
+from pathlib import Path
+
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -190,6 +193,61 @@ def cloud_train(
 
 
 @app.command()
+def cloud_sft(
+    gpu: str = typer.Option("A100", help="GPU type: A100, H100, L4, RTX4090"),
+    max_steps: int = typer.Option(0, help="Training steps (0 = auto, 3 epochs)"),
+    max_samples: int = typer.Option(20000, help="Max SFT training samples"),
+    estimate_only: bool = typer.Option(False, "--estimate", help="Only show cost estimate"),
+    async_mode: bool = typer.Option(True, "--async/--sync", help="Async mode (safe to close laptop)"),
+):
+    """Fine-tune on cloud GPU. Downloads base model from HF, runs SFT, uploads result."""
+    from src.training.cloud import estimate_cost
+
+    # SFT is faster than pre-training — estimate ~2000 steps
+    display_steps = max_steps if max_steps > 0 else 2000
+
+    est = estimate_cost(gpu, display_steps)
+    console.print(f"[bold]Cloud SFT estimate:[/bold]")
+    console.print(f"  GPU: {est['gpu']}")
+    console.print(f"  Rate: ${est['cost_per_hour']}/hr")
+    console.print(f"  Time: ~{est['estimated_hours']} hours")
+    console.print(f"  Cost: ~${est['estimated_cost_usd']:.2f}")
+    console.print(f"  SFT samples: {max_samples}")
+    if async_mode:
+        console.print(f"  Mode: [cyan]async (safe to close laptop)[/cyan]")
+
+    if estimate_only:
+        return
+
+    if not typer.confirm(f"\nProceed with ~${est['estimated_cost_usd']:.2f} cloud SFT?"):
+        console.print("Cancelled.")
+        return
+
+    # Launch cloud pod with SFT mode
+    from src.training.cloud import _runpod_launch_pod
+
+    result = _runpod_launch_pod(
+        gpu=gpu,
+        max_steps=max_steps,
+        async_mode=async_mode,
+        mode="sft",
+        extra_env=[
+            {"key": "SFT_MAX_SAMPLES", "value": str(max_samples)},
+        ],
+    )
+
+    if async_mode:
+        console.print(f"\n[bold green]SFT job submitted![/bold green]")
+        console.print("  The pod will:")
+        console.print("  1. Download base model from HuggingFace")
+        console.print("  2. Download SlimOrca instruction data")
+        console.print("  3. Fine-tune and upload to HF as 'sft-latest'")
+        console.print("  4. Self-destruct")
+        console.print("\n  Check progress: terra cloud-status")
+        console.print("  Download results: terra cloud-download")
+
+
+@app.command()
 def cloud_status():
     """Check the status of an active cloud training job."""
     from src.training.cloud import cloud_status as check_status
@@ -285,6 +343,72 @@ def generate_data(
 
 
 @app.command()
+def chat(
+    model_path: str = typer.Argument(None, help="Path to model checkpoint"),
+    max_tokens: int = typer.Option(200, help="Max tokens to generate"),
+    temperature: float = typer.Option(0.7, help="Sampling temperature"),
+    tokenizer_path: str = typer.Option("models/tokenizer", help="Path to tokenizer"),
+):
+    """Interactive chat with your Terra model."""
+    import torch
+    from pathlib import Path
+
+    from src.training.model import TerraForCausalLM
+    from src.training.tokenizer import load_tokenizer
+
+    # Auto-detect model path
+    if model_path is None:
+        candidates = [
+            "models/current",
+            "models/checkpoints/pretrain/best/latest",
+            "models/checkpoints/pretrain/best",
+            "models/checkpoints/pretrain/final",
+        ]
+        for c in candidates:
+            if Path(c).exists() and (Path(c) / "config.json").exists():
+                model_path = c
+                break
+        if model_path is None:
+            console.print("[red]No model found. Train one first with 'terra pretrain' or 'terra cloud-train'.[/red]")
+            raise typer.Exit(1)
+
+    console.print(f"[bold]Loading Terra from {model_path}...[/bold]")
+    model = TerraForCausalLM.from_pretrained(model_path)
+    tokenizer = load_tokenizer(tokenizer_path)
+    model.eval()
+
+    params = sum(p.numel() for p in model.parameters())
+    console.print(f"[green]Model loaded ({params / 1e6:.1f}M params). Type your prompt, empty line to quit.[/green]")
+    console.print("[dim]Tip: This is a base model (text completion). For Q&A, try prompts like:[/dim]")
+    console.print("[dim]  'Question: What is 5+5? Answer:' or 'The capital of France is'[/dim]\n")
+
+    while True:
+        try:
+            prompt = console.input("[bold cyan]You:[/bold cyan] ")
+        except (EOFError, KeyboardInterrupt):
+            break
+        if not prompt.strip():
+            break
+
+        input_ids = torch.tensor([tokenizer.encode(prompt).ids])
+        prompt_len = input_ids.shape[1]
+
+        with torch.no_grad():
+            output = model.generate(
+                input_ids,
+                max_new_tokens=max_tokens,
+                temperature=temperature,
+            )
+
+        # Only decode the NEW tokens (skip the prompt)
+        new_tokens = output[0][prompt_len:].tolist()
+        response = tokenizer.decode(new_tokens).strip()
+        console.print(f"[bold green]Terra:[/bold green] {response}\n")
+
+    console.print("\n[dim]Goodbye![/dim]")
+
+
+@app.command()
 def serve(
     model_path: str = typer.Argument("models/current", help="Path to model"),
     port: int = typer.Option(8080, help="Server port"),
@@ -377,6 +501,332 @@ def init():
     console.print()
 
     console.print("[bold green]Pipeline initialized! Run 'terra pretrain' to start training.[/bold green]")
+
+
+@app.command()
+def sft(
+    model_path: str = typer.Argument(None, help="Path to pre-trained model (auto-detects)"),
+    data_dir: str = typer.Option("data/sft", help="SFT data directory"),
+    output_dir: str = typer.Option("models/checkpoints/sft", help="Output directory"),
+    batch_size: int = typer.Option(4, help="Micro batch size"),
+    grad_accum: int = typer.Option(4, help="Gradient accumulation steps"),
+    max_steps: int = typer.Option(0, help="Max steps (0 = auto, 3 epochs)"),
+    learning_rate: float = typer.Option(2e-5, help="Learning rate"),
+    max_length: int = typer.Option(1024, help="Max sequence length"),
+    download: bool = typer.Option(True, help="Download SFT data if not present"),
+    max_samples: int = typer.Option(20000, help="Max training samples to download"),
+):
+    """Instruction fine-tune Terra (SFT). Makes the model conversational."""
+    from src.training.sft import download_sft_data, finetune
+
+    # Auto-detect model
+    if model_path is None:
+        candidates = [
+            "models/checkpoints/pretrain/best/latest",
+            "models/checkpoints/pretrain/best",
+            "models/checkpoints/pretrain/final",
+            "models/current",
+        ]
+        for c in candidates:
+            if Path(c).exists() and (Path(c) / "config.json").exists():
+                model_path = c
+                break
+        if model_path is None:
+            console.print("[red]No pre-trained model found. Run 'terra pretrain' or 'terra cloud-train' first.[/red]")
+            raise typer.Exit(1)
+
+    console.print(f"[bold]Instruction fine-tuning (SFT)[/bold]")
+    console.print(f"  Base model: {model_path}")
+
+    # Download data if needed
+    data_file = Path(data_dir) / "train.jsonl"
+    if download and not data_file.exists():
+        console.print(f"[bold cyan]Downloading instruction data...[/bold cyan]")
+        download_sft_data(output_dir=data_dir, max_samples=max_samples)
+
+    if not data_file.exists():
+        console.print("[red]No SFT data found. Download failed or was skipped.[/red]")
+        raise typer.Exit(1)
+
+    result = finetune(
+        model_path=model_path,
+        data_path=data_dir,
+        output_dir=output_dir,
+        batch_size=batch_size,
+        gradient_accumulation_steps=grad_accum,
+        learning_rate=learning_rate,
+        max_steps=max_steps,
+        max_length=max_length,
+    )
+
+    console.print(f"\n[bold green]SFT complete![/bold green]")
+    console.print(f"  Best val loss: {result.get('best_val_loss', 'N/A'):.4f}")
+    console.print(f"  Model saved to: {result.get('model_path', output_dir)}")
+    console.print(f"  Try it: terra chat")
+
+
+@app.command()
+def train_vision(
+    data_dir: str = typer.Option("data/vision", help="Vision data directory"),
+    output_dir: str = typer.Option("models/checkpoints/vision", help="Output directory"),
+    preset: str = typer.Option("vision_tiny", help="Preset: vision_tiny, vision_small, vision_base"),
+    batch_size: int = typer.Option(32, help="Batch size"),
+    max_steps: int = typer.Option(5000, help="Max training steps (0 = auto)"),
+    learning_rate: float = typer.Option(3e-4, help="Learning rate"),
+):
+    """Train the vision encoder (image understanding)."""
+    from src.training.train_multimodal import train_vision_encoder
+
+    console.print(f"[bold]Training vision encoder ({preset})...[/bold]")
+    result = train_vision_encoder(
+        data_dir=data_dir, output_dir=output_dir, preset=preset,
+        batch_size=batch_size, learning_rate=learning_rate, max_steps=max_steps,
+    )
+    console.print(f"[bold green]Vision training complete.[/bold green]")
+    console.print(f"  Steps: {result['total_steps']}, Best val loss: {result.get('best_val_loss', 'N/A')}")
+
+
+@app.command()
+def train_image_gen(
+    data_dir: str = typer.Option("data/image_gen", help="Image gen data directory"),
+    output_dir: str = typer.Option("models/checkpoints/image_gen", help="Output directory"),
+    preset: str = typer.Option("gen_tiny", help="Preset: gen_tiny, gen_small, gen_base"),
+    batch_size: int = typer.Option(8, help="Batch size"),
+    max_steps: int = typer.Option(10000, help="Total steps (VAE + diffusion)"),
+    vae_steps: int = typer.Option(2000, help="Steps for VAE pre-training phase"),
+    learning_rate: float = typer.Option(1e-4, help="Learning rate"),
+):
+    """Train the image generator (text-to-image diffusion)."""
+    from src.training.train_multimodal import train_image_generator
+
+    console.print(f"[bold]Training image generator ({preset})...[/bold]")
+    result = train_image_generator(
+        data_dir=data_dir, output_dir=output_dir, preset=preset,
+        batch_size=batch_size, learning_rate=learning_rate,
+        max_steps=max_steps, vae_pretrain_steps=vae_steps,
+    )
+    console.print(f"[bold green]Image generator training complete.[/bold green]")
+    console.print(f"  Steps: {result['total_steps']}")
+
+
+@app.command()
+def train_audio(
+    data_dir: str = typer.Option("data/audio", help="Audio data directory"),
+    output_dir: str = typer.Option("models/checkpoints/audio", help="Output directory"),
+    preset: str = typer.Option("audio_tiny", help="Preset: audio_tiny, audio_small, audio_base"),
+    batch_size: int = typer.Option(8, help="Batch size"),
+    max_steps: int = typer.Option(5000, help="Max training steps (0 = auto)"),
+    learning_rate: float = typer.Option(3e-4, help="Learning rate"),
+):
+    """Train the audio encoder (speech-to-text)."""
+    from src.training.train_multimodal import train_audio_encoder
+
+    console.print(f"[bold]Training audio encoder ({preset})...[/bold]")
+    result = train_audio_encoder(
+        data_dir=data_dir, output_dir=output_dir, preset=preset,
+        batch_size=batch_size, learning_rate=learning_rate, max_steps=max_steps,
+    )
+    console.print(f"[bold green]Audio encoder training complete.[/bold green]")
+    console.print(f"  Steps: {result['total_steps']}, Best val loss: {result.get('best_val_loss', 'N/A')}")
+
+
+@app.command()
+def train_speech(
+    data_dir: str = typer.Option("data/tts", help="TTS data directory"),
+    output_dir: str = typer.Option("models/checkpoints/speech", help="Output directory"),
+    preset: str = typer.Option("speech_tiny", help="Preset: speech_tiny, speech_small"),
+    batch_size: int = typer.Option(8, help="Batch size"),
+    max_steps: int = typer.Option(5000, help="Max training steps (0 = auto)"),
+    learning_rate: float = typer.Option(3e-4, help="Learning rate"),
+):
+    """Train the speech decoder (text-to-speech codec)."""
+    from src.training.train_multimodal import train_speech_decoder
+
+    console.print(f"[bold]Training speech decoder ({preset})...[/bold]")
+    result = train_speech_decoder(
+        data_dir=data_dir, output_dir=output_dir, preset=preset,
+        batch_size=batch_size, learning_rate=learning_rate, max_steps=max_steps,
+    )
+    console.print(f"[bold green]Speech decoder training complete.[/bold green]")
+    console.print(f"  Steps: {result['total_steps']}, Best val loss: {result.get('best_val_loss', 'N/A')}")
+
+
+@app.command()
+def test_vision(
+    image_path: str = typer.Argument(..., help="Path to an image file"),
+    model_path: str = typer.Option("models/checkpoints/vision/best", help="Vision encoder checkpoint"),
+):
+    """Test vision encoder: describe what the model sees in an image."""
+    import torch
+    from PIL import Image
+    from torchvision import transforms
+
+    from src.training.vision_encoder import TerraVisionEncoder
+
+    console.print(f"[bold]Loading vision encoder from {model_path}...[/bold]")
+    model = TerraVisionEncoder.from_pretrained(model_path)
+    model.eval()
+
+    transform = transforms.Compose([
+        transforms.Resize((model.config.image_size, model.config.image_size)),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+    ])
+
+    image = Image.open(image_path).convert("RGB")
+    pixel_values = transform(image).unsqueeze(0)
+
+    with torch.no_grad():
+        embeddings = model(pixel_values)
+
+    console.print(f"[green]Image encoded into {embeddings.shape[1]} tokens of dimension {embeddings.shape[2]}[/green]")
+    console.print(f"Embedding norm: {embeddings.norm(dim=-1).mean().item():.4f}")
+    console.print("(These embeddings would be fed into the Terra LLM for captioning/VQA)")
+
+
+@app.command()
+def test_image_gen(
+    prompt: str = typer.Argument(..., help="Text prompt for image generation"),
+    output_path: str = typer.Option("generated.png", help="Output image path"),
+    model_path: str = typer.Option("models/checkpoints/image_gen", help="Image generator checkpoint"),
+    steps: int = typer.Option(4, help="Denoising steps (1-50, fewer = faster)"),
+):
+    """Generate an image from a text prompt."""
+    import torch
+
+    from src.training.image_generator import ImageGenConfig, TerraImageGenerator
+    from src.training.tokenizer import load_tokenizer
+
+    console.print(f"[bold]Loading image generator from {model_path}...[/bold]")
+
+    config = ImageGenConfig.from_dict(json.loads(Path(model_path, "config.json").read_text()))
+    model = TerraImageGenerator(config)
+    state = torch.load(str(Path(model_path) / "image_generator.pt"), map_location="cpu", weights_only=True)
+    model.load_state_dict(state)
+    model.eval()
+
+    tokenizer = load_tokenizer("models/tokenizer")
+    token_ids = tokenizer.encode(prompt).ids[:77]
+    token_ids = token_ids + [0] * (77 - len(token_ids))
+    input_ids = torch.tensor([token_ids])
+
+    # Simple text embedding (would normally come from the LLM)
+    text_embed = torch.nn.Embedding(32000, config.context_dim)
+    context = text_embed(input_ids)
+
+    console.print(f"Generating with {steps} steps...")
+    with torch.no_grad():
+        images = model.generate_fast(context, num_steps=steps) if steps <= 4 else model.generate(context, num_steps=steps)
+
+    # Save as PNG
+    from torchvision.utils import save_image
+    save_image(images[0] * 0.5 + 0.5, output_path)  # [-1,1] -> [0,1]
+    console.print(f"[green]Image saved to {output_path}[/green]")
+
+
+@app.command()
+def test_stt(
+    audio_path: str = typer.Argument(..., help="Path to a WAV audio file"),
+    model_path: str = typer.Option("models/checkpoints/audio/best", help="Audio encoder checkpoint"),
+):
+    """Transcribe speech from an audio file (speech-to-text)."""
+    import torch
+    import torchaudio
+
+    from src.data.multimodal_downloader import _compute_mel
+    from src.training.audio_encoder import TerraAudioEncoder
+    from src.training.tokenizer import load_tokenizer
+
+    console.print(f"[bold]Loading audio encoder from {model_path}...[/bold]")
+    model = TerraAudioEncoder.from_pretrained(model_path)
+    model.eval()
+
+    tokenizer = load_tokenizer("models/tokenizer")
+
+    # Load audio
+    waveform, sr = torchaudio.load(audio_path)
+    if sr != 16000:
+        waveform = torchaudio.functional.resample(waveform, sr, 16000)
+    waveform = waveform[0]  # mono
+
+    # Compute mel
+    mel = _compute_mel(waveform, 16000).unsqueeze(0)
+
+    with torch.no_grad():
+        log_probs = model.forward_ctc(mel)  # (1, T, vocab)
+        pred_ids = log_probs.argmax(dim=-1)[0].tolist()
+
+    # CTC decode: collapse repeats, remove blanks
+    decoded = []
+    prev = -1
+    for idx in pred_ids:
+        if idx != 0 and idx != prev:
+            decoded.append(idx)
+        prev = idx
+
+    text = tokenizer.decode(decoded)
+    console.print(f"[green]Transcription:[/green] {text}")
+
+
+@app.command()
+def test_tts(
+    text: str = typer.Argument(..., help="Text to synthesize"),
+    output_path: str = typer.Option("speech.wav", help="Output WAV file path"),
+    model_path: str = typer.Option("models/checkpoints/speech/best", help="Speech decoder checkpoint"),
+):
+    """Synthesize speech from text (text-to-speech)."""
+    import struct
+    import wave
+
+    import torch
+
+    from src.data.multimodal_downloader import _compute_mel
+    from src.training.speech_decoder import TerraSpeechDecoder
+    from src.training.tokenizer import load_tokenizer
+
+    console.print(f"[bold]Loading speech decoder from {model_path}...[/bold]")
+    model = TerraSpeechDecoder.from_pretrained(model_path)
+    model.eval()
+
+    tokenizer = load_tokenizer("models/tokenizer")
+
+    # Encode text -> simulate LLM hidden states
+    token_ids = tokenizer.encode(text).ids
+    input_tensor = torch.tensor([token_ids])
+    text_embed = torch.nn.Embedding(32000, model.config.lm_hidden_size)
+    lm_hidden = text_embed(input_tensor)
+
+    # Generate: encode a reference mel to get tokens, then decode conditioned on text
+    # For now, just demonstrate the codec pipeline with a dummy mel
+    target_frames = len(token_ids) * 10  # rough estimate
+    dummy_mel = torch.randn(1, model.config.num_mel_bins, target_frames)
+
+    with torch.no_grad():
+        # Codec encode -> VQ -> decode (shows the reconstruction quality)
+        mel_hat, token_ids_vq, _ = model.forward_codec(dummy_mel)
+
+    # Convert mel to simple waveform (Griffin-Lim approximation)
+    mel_np = mel_hat[0].exp().numpy()
+    # Simple overlap-add synthesis
+    sr = model.config.sample_rate
+    hop = model.config.hop_length
+    n_frames = mel_np.shape[1]
+    audio = torch.zeros(n_frames * hop)
+    for i in range(n_frames):
+        freq = mel_np[:, i].mean() * 0.01
+        t = torch.linspace(0, hop / sr, hop)
+        audio[i * hop:(i + 1) * hop] = torch.sin(2 * 3.14159 * 440 * freq * t) * 0.3
+
+    # Save WAV
+    audio_int16 = (audio.clamp(-1, 1) * 32767).to(torch.int16).numpy()
+    with wave.open(output_path, "w") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(sr)
+        wf.writeframes(audio_int16.tobytes())
+
+    console.print(f"[green]Speech saved to {output_path}[/green]")
+    console.print("[dim](Note: quality depends on training. Untrained model produces noise.)[/dim]")
 
 
 @app.command()

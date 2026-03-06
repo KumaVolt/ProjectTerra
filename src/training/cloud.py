@@ -214,13 +214,16 @@ def _runpod_graphql(client, headers, query: str, variables: dict = None) -> dict
     return data
 
 
-def _runpod_pretrain(
-    config_path: str, gpu: str, max_steps: int, sync_checkpoint: bool, async_mode: bool,
+def _runpod_launch_pod(
+    gpu: str, max_steps: int, async_mode: bool = True,
+    mode: str = "pretrain", extra_env: list = None,
 ) -> dict:
-    """Run pre-training on a RunPod GPU pod."""
+    """Launch a RunPod GPU pod for training (pretrain or SFT).
+
+    This is the shared pod creation logic used by both cloud-train and cloud-sft.
+    """
     client, headers = _runpod_client()
 
-    # RunPod GPU type IDs (must match exactly)
     gpu_map = {
         "A100": "NVIDIA A100 80GB PCIe",
         "A100-SXM": "NVIDIA A100-SXM4-80GB",
@@ -234,7 +237,6 @@ def _runpod_pretrain(
     }
     gpu_id = gpu_map.get(gpu, gpu)
 
-    # Get the git remote URL so the pod can clone the repo
     try:
         repo_url = subprocess.run(
             ["git", "remote", "get-url", "origin"],
@@ -243,16 +245,13 @@ def _runpod_pretrain(
     except subprocess.CalledProcessError:
         repo_url = ""
 
-    # The pod clones the repo and runs scripts/cloud_train.py
-    # Everything is handled by that script: train, upload to HF, self-destruct
-    pod_name = f"terra-pretrain-{int(time.time())}"
+    pod_name = f"terra-{mode}-{int(time.time())}"
     hf_token = os.environ.get("HF_TOKEN", "")
     hf_repo = os.environ.get("HF_REPO_ID", "")
     rp_key = os.environ["RUNPOD_API_KEY"]
 
-    print(f"[cloud/runpod] Creating pod with {gpu_id}...")
+    print(f"[cloud/runpod] Creating {mode} pod with {gpu_id}...")
 
-    # Use JSON variables for the mutation (inline GraphQL breaks with complex strings)
     query = """
     mutation createPod($input: PodFindAndDeployOnDemandInput!) {
         podFindAndDeployOnDemand(input: $input) {
@@ -262,11 +261,18 @@ def _runpod_pretrain(
         }
     }
     """
-    # RunPod passes dockerArgs to the container entrypoint.
-    # The pytorch image entrypoint execs its arguments directly (not via sh -c),
-    # so we must explicitly invoke bash -c with the full command as one arg.
-    # Using env var REPO_URL avoids URL characters in the dockerArgs string.
     docker_args = "bash -c 'cd /workspace && (git clone $REPO_URL terra 2>/dev/null || cd terra && git pull) && cd terra && python scripts/cloud_train.py'"
+
+    env = [
+        {"key": "TRAINING_MODE", "value": mode},
+        {"key": "TRAINING_MAX_STEPS", "value": str(max_steps)},
+        {"key": "RUNPOD_API_KEY", "value": rp_key},
+        {"key": "HF_TOKEN", "value": hf_token},
+        {"key": "HF_REPO_ID", "value": hf_repo},
+        {"key": "REPO_URL", "value": repo_url},
+    ]
+    if extra_env:
+        env.extend(extra_env)
 
     variables = {
         "input": {
@@ -279,13 +285,7 @@ def _runpod_pretrain(
             "minVcpuCount": 1,
             "minMemoryInGb": 1,
             "dockerArgs": docker_args,
-            "env": [
-                {"key": "TRAINING_MAX_STEPS", "value": str(max_steps)},
-                {"key": "RUNPOD_API_KEY", "value": rp_key},
-                {"key": "HF_TOKEN", "value": hf_token},
-                {"key": "HF_REPO_ID", "value": hf_repo},
-                {"key": "REPO_URL", "value": repo_url},
-            ],
+            "env": env,
         },
     }
 
@@ -304,11 +304,11 @@ def _runpod_pretrain(
     pod_id = pod_data["id"]
     print(f"[cloud/runpod] Pod created: {pod_id}")
 
-    # Save job state for async tracking
     job_state = {
         "provider": "runpod",
         "pod_id": pod_id,
         "gpu": gpu,
+        "mode": mode,
         "max_steps": max_steps,
         "started_at": time.time(),
         "status": "running",
@@ -316,11 +316,27 @@ def _runpod_pretrain(
     _save_cloud_state(job_state)
 
     if async_mode:
-        print(f"[cloud/runpod] Job running in background. Close your laptop safely.")
+        print(f"[cloud/runpod] {mode} job running in background. Close your laptop safely.")
         print(f"[cloud/runpod] Check progress: terra cloud-status")
         print(f"[cloud/runpod] Download results: terra cloud-download")
         client.close()
-        return {"status": "started", "pod_id": pod_id, "provider": "runpod"}
+        return {"status": "started", "pod_id": pod_id, "provider": "runpod", "mode": mode}
+
+    client.close()
+    return {"status": "started", "pod_id": pod_id, "provider": "runpod", "mode": mode}
+
+
+def _runpod_pretrain(
+    config_path: str, gpu: str, max_steps: int, sync_checkpoint: bool, async_mode: bool,
+) -> dict:
+    """Run pre-training on a RunPod GPU pod."""
+    result = _runpod_launch_pod(gpu=gpu, max_steps=max_steps, async_mode=async_mode, mode="pretrain")
+
+    if async_mode:
+        return result
+
+    pod_id = result["pod_id"]
+    client, headers = _runpod_client()
 
     # Synchronous mode: wait for completion
     try:
