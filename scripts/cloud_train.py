@@ -491,7 +491,15 @@ def _upload_session_log():
         print(f"[cloud_train] WARNING: Could not upload session log: {e}", flush=True)
 
 
+LOCK_FILE = "/workspace/terra/.cloud_train_done"
+
+
 def main():
+    # Prevent re-running if container restarts after self-destruct
+    if os.path.exists(LOCK_FILE):
+        print("[cloud_train] Already completed (lock file exists). Exiting.", flush=True)
+        return
+
     # Tee all output to a log file so we can upload it before shutdown
     log_f = open(LOG_FILE_PATH, "w")
     sys.stdout = _TeeWriter(sys.__stdout__, log_f)
@@ -525,6 +533,10 @@ def main():
     # Always upload the full session log and terminate
     _upload_session_log()
     log_f.close()
+
+    # Write lock file so container restart won't re-run training
+    with open(LOCK_FILE, "w") as f:
+        f.write("done")
     self_destruct()
 
 
