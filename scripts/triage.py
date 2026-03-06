@@ -73,7 +73,7 @@ def _call_glm(prompt: str, system: str, max_tokens: int, api_key: str) -> str:
             with httpx.Client(timeout=120) as client:
                 resp = client.post(
                     f"{url}/chat/completions",
-                    json={"model": "glm-4-plus", "max_tokens": max_tokens, "messages": messages},
+                    json={"model": "glm-4.5-air", "max_tokens": max_tokens, "messages": messages},
                     headers={
                         "Authorization": f"Bearer {api_key}",
                         "Content-Type": "application/json",

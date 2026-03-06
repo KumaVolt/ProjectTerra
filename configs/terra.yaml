@@ -90,7 +90,7 @@ llm_resources:
       - code_review
   glm:  # Optional: set GLM_API_KEY to enable
     base_url: "https://api.z.ai/api/paas/v4"
-    model: "glm-4-plus"
+    model: "glm-4.5-air"
     max_tokens_per_session: 100000
     tasks:
       - research

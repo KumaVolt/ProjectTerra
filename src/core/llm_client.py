@@ -149,7 +149,7 @@ class GLMClient:
 
     def __init__(
         self,
-        model: str = "glm-4-plus",
+        model: str = "glm-4.5-air",
         base_url: str | None = None,
     ):
         self.api_key = os.environ["GLM_API_KEY"]
