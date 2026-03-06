@@ -313,6 +313,11 @@ def download_audio_data(
                     kwargs["name"] = info["hf_subset"]
 
                 ds = load_dataset(**kwargs)
+
+                # Force soundfile backend for audio decoding (torchcodec has ABI issues on cloud)
+                from datasets import Audio
+                ds = ds.cast_column(info["audio_field"], Audio(sampling_rate=info.get("target_sr", 16000)))
+
                 count = 0
 
                 for example in ds:
@@ -511,6 +516,11 @@ def download_tts_data(
                     kwargs["name"] = info["hf_subset"]
 
                 ds = load_dataset(**kwargs)
+
+                # Force soundfile backend for audio decoding (torchcodec has ABI issues on cloud)
+                from datasets import Audio
+                ds = ds.cast_column(info["audio_field"], Audio(sampling_rate=target_sr))
+
                 count = 0
 
                 for example in ds:
