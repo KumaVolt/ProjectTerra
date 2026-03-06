@@ -338,10 +338,10 @@ def run_multimodal(max_steps: int) -> dict:
 
     # 2. Download multimodal data — each modality separately so one failure doesn't kill all
     print("[multimodal] Step 2/5: Downloading multimodal data...", flush=True)
-    # Install FFmpeg + audio codec support (torchcodec needs libavutil)
+    # Install audio support: soundfile + libsndfile (NOT torchcodec — ABI mismatch with container PyTorch)
     subprocess.run(["apt-get", "update", "-qq"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    subprocess.run(["apt-get", "install", "-y", "-qq", "ffmpeg"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    subprocess.run([sys.executable, "-m", "pip", "install", "torchcodec", "soundfile", "--quiet"])
+    subprocess.run(["apt-get", "install", "-y", "-qq", "ffmpeg", "libsndfile1"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    subprocess.run([sys.executable, "-m", "pip", "install", "soundfile", "--quiet"])
 
     has_vision = False
     has_audio = False
@@ -358,9 +358,9 @@ def run_multimodal(max_steps: int) -> dict:
         elif flag_name == "audio":
             has_audio = True
 
-    # Check if data actually exists on disk (download may "succeed" but produce nothing)
-    has_vision = has_vision or os.path.isdir("data/vision")
-    has_audio = has_audio or os.path.exists("data/tts/manifest.jsonl")
+    # Check if data actually exists on disk with real content
+    has_vision = os.path.exists("data/vision/captions.jsonl") and os.path.getsize("data/vision/captions.jsonl") > 100
+    has_audio = os.path.exists("data/tts/manifest.jsonl") and os.path.getsize("data/tts/manifest.jsonl") > 100
     print(f"[multimodal] Data: vision={has_vision}, audio={has_audio}", flush=True)
 
     # 3. Train image tokenizer

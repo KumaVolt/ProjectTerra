@@ -196,7 +196,9 @@ class ImageVQDecoder(nn.Module):
             nn.ConvTranspose2d(d, h, 4, stride=2, padding=1), nn.SiLU(),
             nn.ConvTranspose2d(h, h, 4, stride=2, padding=1), nn.SiLU(),
             nn.ConvTranspose2d(h, h // 2, 4, stride=2, padding=1), nn.SiLU(),
-            nn.ConvTranspose2d(h // 2, 3, 4, stride=2, padding=1), nn.Tanh(),
+            nn.ConvTranspose2d(h // 2, 3, 4, stride=2, padding=1),
+            # No activation — images are ImageNet-normalized (range ~[-2.5, 2.5])
+            # Tanh would cap at [-1, 1] causing permanent high MSE loss
         )
 
     def forward(self, quantized: torch.Tensor) -> torch.Tensor:
