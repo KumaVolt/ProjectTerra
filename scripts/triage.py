@@ -51,7 +51,7 @@ def _call_claude(prompt: str, system: str, max_tokens: int, api_key: str) -> str
 
 
 def _call_glm(prompt: str, system: str, max_tokens: int, api_key: str) -> str:
-    base_url = os.environ.get("GLM_API_BASE", "https://open.bigmodel.cn/api/paas/v4")
+    base_url = os.environ.get("GLM_API_BASE", "https://api.z.ai/api/paas/v4")
     messages = []
     if system:
         messages.append({"role": "system", "content": system})
@@ -60,7 +60,7 @@ def _call_glm(prompt: str, system: str, max_tokens: int, api_key: str) -> str:
     # Try multiple known GLM API endpoints
     urls_to_try = [
         base_url,
-        "https://open.bigmodel.cn/api/paas/v4",
+        "https://api.z.ai/api/paas/v4",
         "https://api.z.ai/v1",
     ]
     # Deduplicate while preserving order

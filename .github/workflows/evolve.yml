@@ -114,7 +114,7 @@ jobs:
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           GLM_API_KEY: ${{ secrets.GLM_API_KEY }}
-          GLM_API_BASE: https://open.bigmodel.cn/api/paas/v4
+          GLM_API_BASE: https://api.z.ai/api/paas/v4
           CYCLE_MODE: ${{ inputs.mode || 'full' }}
           TARGET_ISSUE: ${{ inputs.target_issue || '' }}
         run: python scripts/triage.py
@@ -332,7 +332,7 @@ jobs:
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           GLM_API_KEY: ${{ secrets.GLM_API_KEY }}
-          GLM_API_BASE: https://open.bigmodel.cn/api/paas/v4
+          GLM_API_BASE: https://api.z.ai/api/paas/v4
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           HF_REPO_ID: KumaVolt/terra-checkpoints
           GITHUB_REPOSITORY: ${{ github.repository }}
