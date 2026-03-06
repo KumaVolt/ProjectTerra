@@ -238,17 +238,25 @@ def self_destruct():
 
 def run_multimodal(max_steps: int) -> dict:
     """Run the full multimodal pipeline: tokenizers + unified fine-tuning."""
-    # 1. Get base text model
-    base_model_path = _find_or_download_base_model()
+    import sys as _sys
+    # Force unbuffered output so logs appear in RunPod dashboard
+    _sys.stdout.reconfigure(line_buffering=True)
+    _sys.stderr.reconfigure(line_buffering=True)
 
-    # 2. Download multimodal data
-    print("Downloading multimodal training data...")
+    # 1. Get base text model
+    print("[multimodal] Step 1/5: Getting base text model...", flush=True)
+    base_model_path = _find_or_download_base_model()
+    print(f"[multimodal] Base model: {base_model_path}", flush=True)
+
+    # 2. Download multimodal data (minimal=True to keep it fast, ~5K images + 2K audio)
+    print("[multimodal] Step 2/5: Downloading multimodal data...", flush=True)
     subprocess.run([sys.executable, "-c",
-        "from src.data.multimodal_downloader import download_all_multimodal_data; download_all_multimodal_data(minimal=False)"],
+        "from src.data.multimodal_downloader import download_all_multimodal_data; download_all_multimodal_data(minimal=True)"],
         check=True)
+    print("[multimodal] Data download complete.", flush=True)
 
     # 3. Train image tokenizer
-    print("Training image tokenizer...")
+    print("[multimodal] Step 3/5: Training image tokenizer...", flush=True)
     from src.training.train_multimodal import train_image_tokenizer
     img_result = train_image_tokenizer(
         data_dir="data/vision",
@@ -256,10 +264,10 @@ def run_multimodal(max_steps: int) -> dict:
         batch_size=32,
         max_steps=5000,
     )
-    print(f"Image tokenizer done: {img_result.get('total_steps')} steps")
+    print(f"[multimodal] Image tokenizer done: {img_result.get('total_steps')} steps", flush=True)
 
     # 4. Train audio tokenizer
-    print("Training audio tokenizer...")
+    print("[multimodal] Step 4/5: Training audio tokenizer...", flush=True)
     from src.training.train_multimodal import train_audio_tokenizer
     audio_result = train_audio_tokenizer(
         data_dir="data/tts",
@@ -267,11 +275,11 @@ def run_multimodal(max_steps: int) -> dict:
         batch_size=16,
         max_steps=3000,
     )
-    print(f"Audio tokenizer done: {audio_result.get('total_steps')} steps")
+    print(f"[multimodal] Audio tokenizer done: {audio_result.get('total_steps')} steps", flush=True)
 
     # 5. Multimodal fine-tuning
     mm_steps = max_steps if max_steps > 0 else 10000
-    print(f"Starting multimodal fine-tuning ({mm_steps} steps)...")
+    print(f"[multimodal] Step 5/5: Multimodal fine-tuning ({mm_steps} steps)...", flush=True)
     from src.training.train_multimodal import train_multimodal
     result = train_multimodal(
         text_model_path=base_model_path,
@@ -285,26 +293,41 @@ def run_multimodal(max_steps: int) -> dict:
         learning_rate=1e-4,
         max_steps=mm_steps,
     )
+    print(f"[multimodal] All done! Result: {result}", flush=True)
     return result
 
 
 def main():
+    import sys as _sys
+    # Force unbuffered output so logs appear in RunPod dashboard immediately
+    _sys.stdout.reconfigure(line_buffering=True)
+    _sys.stderr.reconfigure(line_buffering=True)
+
     mode = os.environ.get("TRAINING_MODE", "pretrain")
     max_steps = int(os.environ.get("TRAINING_MAX_STEPS", "0"))
     max_samples = int(os.environ.get("SFT_MAX_SAMPLES", "20000"))
 
-    setup_repo()
+    print(f"[cloud_train] Starting: mode={mode}, max_steps={max_steps}", flush=True)
 
-    if mode == "sft":
-        result = run_sft(max_steps, max_samples)
-    elif mode == "multimodal":
-        result = run_multimodal(max_steps)
-    else:
-        result = run_pretrain(max_steps)
+    try:
+        setup_repo()
+        print(f"[cloud_train] Repo setup complete, starting {mode}...", flush=True)
 
-    print(f"Training complete: {result}")
+        if mode == "sft":
+            result = run_sft(max_steps, max_samples)
+        elif mode == "multimodal":
+            result = run_multimodal(max_steps)
+        else:
+            result = run_pretrain(max_steps)
 
-    upload_to_hf(result, mode)
+        print(f"[cloud_train] Training complete: {result}", flush=True)
+        upload_to_hf(result, mode)
+
+    except Exception as e:
+        print(f"[cloud_train] FATAL ERROR: {e}", flush=True)
+        import traceback
+        traceback.print_exc()
+
     self_destruct()
 
 
