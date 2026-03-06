@@ -248,11 +248,16 @@ def run_multimodal(max_steps: int) -> dict:
     base_model_path = _find_or_download_base_model()
     print(f"[multimodal] Base model: {base_model_path}", flush=True)
 
-    # 2. Download multimodal data (minimal=True to keep it fast, ~5K images + 2K audio)
+    # 2. Download multimodal data — each modality separately so one failure doesn't kill all
     print("[multimodal] Step 2/5: Downloading multimodal data...", flush=True)
-    subprocess.run([sys.executable, "-c",
-        "from src.data.multimodal_downloader import download_all_multimodal_data; download_all_multimodal_data(minimal=True)"],
-        check=True)
+    for modality, code in [
+        ("vision", "from src.data.multimodal_downloader import download_vision_data; download_vision_data(max_samples=1000, minimal=True)"),
+        ("audio/tts", "from src.data.multimodal_downloader import download_tts_data; download_tts_data(max_samples=2000, minimal=True)"),
+    ]:
+        print(f"[multimodal]   Downloading {modality}...", flush=True)
+        result = subprocess.run([sys.executable, "-c", code])
+        if result.returncode != 0:
+            print(f"[multimodal]   WARNING: {modality} download failed (code {result.returncode}), continuing...", flush=True)
     print("[multimodal] Data download complete.", flush=True)
 
     # 3. Train image tokenizer
