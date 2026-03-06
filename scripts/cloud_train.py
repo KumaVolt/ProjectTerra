@@ -521,7 +521,7 @@ def main():
         print(f"[cloud_train] FATAL ERROR: {e}", flush=True)
         traceback.print_exc()
 
-    # Always upload the full session log before shutdown
+    # Always upload the full session log and terminate
     _upload_session_log()
     log_f.close()
     self_destruct()
