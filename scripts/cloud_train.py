@@ -250,6 +250,8 @@ def run_multimodal(max_steps: int) -> dict:
 
     # 2. Download multimodal data — each modality separately so one failure doesn't kill all
     print("[multimodal] Step 2/5: Downloading multimodal data...", flush=True)
+    # Install audio codec support (needed for TTS data on cloud)
+    subprocess.run([sys.executable, "-m", "pip", "install", "torchcodec", "soundfile", "--quiet"])
     for modality, code in [
         ("vision", "from src.data.multimodal_downloader import download_vision_data; download_vision_data(max_samples=1000, minimal=True)"),
         ("audio/tts", "from src.data.multimodal_downloader import download_tts_data; download_tts_data(max_samples=2000, minimal=True)"),

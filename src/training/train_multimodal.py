@@ -36,11 +36,12 @@ def train_image_tokenizer(
     data_dir: str = "data/vision",
     output_dir: str = "models/checkpoints/image_tokenizer",
     batch_size: int = 16,
-    learning_rate: float = 3e-4,
+    learning_rate: float = 1e-4,
     max_steps: int = 10000,
     eval_steps: int = 0,
     image_size: int = 256,
     codebook_size: int = 8192,
+    warmup_steps: int = 200,
 ) -> dict:
     """Train image VQ-VAE tokenizer on image reconstruction.
 
@@ -80,10 +81,19 @@ def train_image_tokenizer(
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=0.01)
 
+    # Warmup + cosine decay scheduler to prevent loss explosion
+    def lr_lambda(current_step):
+        if current_step < warmup_steps:
+            return current_step / max(1, warmup_steps)
+        progress = (current_step - warmup_steps) / max(1, max_steps - warmup_steps)
+        return 0.1 + 0.9 * 0.5 * (1 + math.cos(math.pi * progress))
+
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
 
-    print(f"[image_tokenizer] Training: {max_steps} steps, eval every {eval_steps}")
+    print(f"[image_tokenizer] Training: {max_steps} steps, lr={learning_rate}, warmup={warmup_steps}, eval every {eval_steps}")
     step = 0
     best_val_loss = float("inf")
     start_time = time.time()
@@ -104,6 +114,7 @@ def train_image_tokenizer(
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
+            scheduler.step()
 
             step += 1
             if step % 10 == 0:
@@ -152,9 +163,10 @@ def train_audio_tokenizer(
     data_dir: str = "data/tts",
     output_dir: str = "models/checkpoints/audio_tokenizer",
     batch_size: int = 8,
-    learning_rate: float = 3e-4,
+    learning_rate: float = 1e-4,
     max_steps: int = 5000,
     eval_steps: int = 0,
+    warmup_steps: int = 100,
 ) -> dict:
     """Train audio codec tokenizer on mel reconstruction.
 
@@ -189,10 +201,18 @@ def train_audio_tokenizer(
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=0.01)
 
+    def lr_lambda(current_step):
+        if current_step < warmup_steps:
+            return current_step / max(1, warmup_steps)
+        progress = (current_step - warmup_steps) / max(1, max_steps - warmup_steps)
+        return 0.1 + 0.9 * 0.5 * (1 + math.cos(math.pi * progress))
+
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
 
-    print(f"[audio_tokenizer] Training: {max_steps} steps, eval every {eval_steps}")
+    print(f"[audio_tokenizer] Training: {max_steps} steps, lr={learning_rate}, warmup={warmup_steps}, eval every {eval_steps}")
     step = 0
     best_val_loss = float("inf")
     start_time = time.time()
@@ -210,6 +230,7 @@ def train_audio_tokenizer(
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
+            scheduler.step()
 
             step += 1
             if step % 10 == 0:
