@@ -444,11 +444,57 @@ def run_multimodal(max_steps: int) -> dict:
         }
 
 
+class _TeeWriter:
+    """Write to both a stream and a log file simultaneously."""
+
+    def __init__(self, stream, log_file):
+        self.stream = stream
+        self.log_file = log_file
+
+    def write(self, data):
+        self.stream.write(data)
+        self.log_file.write(data)
+        self.log_file.flush()
+
+    def flush(self):
+        self.stream.flush()
+        self.log_file.flush()
+
+    def reconfigure(self, **kwargs):
+        if hasattr(self.stream, "reconfigure"):
+            self.stream.reconfigure(**kwargs)
+
+
+LOG_FILE_PATH = "/workspace/terra/session_log.txt"
+
+
+def _upload_session_log():
+    """Upload the full session log to HuggingFace before shutdown."""
+    hf_token = os.environ.get("HF_TOKEN", "")
+    hf_repo = os.environ.get("HF_REPO_ID", "")
+    if not (hf_token and hf_repo) or not os.path.exists(LOG_FILE_PATH):
+        return
+    try:
+        import time as _time
+        from huggingface_hub import HfApi
+        api = HfApi(token=hf_token)
+        api.create_repo(hf_repo, private=True, exist_ok=True)
+        log_name = f"session_{int(_time.time())}.txt"
+        api.upload_file(
+            path_or_fileobj=LOG_FILE_PATH,
+            path_in_repo=f"logs/{log_name}",
+            repo_id=hf_repo,
+        )
+        print(f"[cloud_train] Session log uploaded to HF: logs/{log_name}", flush=True)
+    except Exception as e:
+        print(f"[cloud_train] WARNING: Could not upload session log: {e}", flush=True)
+
+
 def main():
-    import sys as _sys
-    # Force unbuffered output so logs appear in RunPod dashboard immediately
-    _sys.stdout.reconfigure(line_buffering=True)
-    _sys.stderr.reconfigure(line_buffering=True)
+    # Tee all output to a log file so we can upload it before shutdown
+    log_f = open(LOG_FILE_PATH, "w")
+    sys.stdout = _TeeWriter(sys.__stdout__, log_f)
+    sys.stderr = _TeeWriter(sys.__stderr__, log_f)
 
     mode = os.environ.get("TRAINING_MODE", "pretrain")
     max_steps = int(os.environ.get("TRAINING_MAX_STEPS", "0"))
@@ -472,31 +518,12 @@ def main():
 
     except Exception as e:
         import traceback
-        error_msg = traceback.format_exc()
         print(f"[cloud_train] FATAL ERROR: {e}", flush=True)
-        print(error_msg, flush=True)
+        traceback.print_exc()
 
-        # Upload crash log to HF so we can always see what went wrong
-        hf_token = os.environ.get("HF_TOKEN", "")
-        hf_repo = os.environ.get("HF_REPO_ID", "")
-        if hf_token and hf_repo:
-            try:
-                from huggingface_hub import HfApi
-                api = HfApi(token=hf_token)
-                api.create_repo(hf_repo, private=True, exist_ok=True)
-                import time as _time
-                crash_file = f"crash_log_{int(_time.time())}.txt"
-                with open(crash_file, "w") as f:
-                    f.write(f"mode={mode}\nmax_steps={max_steps}\n\n{error_msg}\n")
-                api.upload_file(
-                    path_or_fileobj=crash_file,
-                    path_in_repo=f"logs/{crash_file}",
-                    repo_id=hf_repo,
-                )
-                print(f"[cloud_train] Crash log uploaded to HF: logs/{crash_file}", flush=True)
-            except Exception:
-                pass
-
+    # Always upload the full session log before shutdown
+    _upload_session_log()
+    log_f.close()
     self_destruct()
 
 
