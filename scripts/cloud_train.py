@@ -164,55 +164,122 @@ def _find_or_download_base_model() -> str:
     return result.get("model_path", "models/checkpoints/pretrain/final")
 
 
+def _find_upload_dir(candidates: list[str]) -> str | None:
+    """Find the first existing directory with model files."""
+    for d in candidates:
+        if os.path.isdir(d) and any(
+            f.endswith((".json", ".safetensors", ".pt", ".bin"))
+            for f in os.listdir(d)
+        ):
+            return d
+    return None
+
+
+def _upload_folder_with_retry(api, folder_path: str, repo_id: str, path_in_repo: str, commit_message: str, retries: int = 3):
+    """Upload folder with retries on failure."""
+    import time as _time
+    for attempt in range(retries):
+        try:
+            api.upload_folder(
+                folder_path=folder_path,
+                repo_id=repo_id,
+                path_in_repo=path_in_repo,
+                commit_message=commit_message,
+            )
+            return True
+        except Exception as e:
+            print(f"  Upload attempt {attempt + 1}/{retries} failed: {e}", flush=True)
+            if attempt < retries - 1:
+                _time.sleep(10 * (attempt + 1))
+    return False
+
+
 def upload_to_hf(result: dict, mode: str):
     """Upload checkpoint to HuggingFace."""
     hf_token = os.environ.get("HF_TOKEN", "")
     hf_repo = os.environ.get("HF_REPO_ID", "")
     if not (hf_token and hf_repo):
-        print("WARNING: HF_TOKEN/HF_REPO_ID not set. Checkpoint NOT uploaded.")
+        print("WARNING: HF_TOKEN/HF_REPO_ID not set. Checkpoint NOT uploaded.", flush=True)
         return
 
     from huggingface_hub import HfApi
     api = HfApi(token=hf_token)
     api.create_repo(hf_repo, private=True, exist_ok=True)
 
-    # Determine upload directory and HF path
+    # For multimodal mode, upload each component separately so partial progress is saved
     if mode == "multimodal":
-        upload_dir = "models/current_multimodal"
-        if not os.path.exists(upload_dir):
-            upload_dir = "models/checkpoints/multimodal/best"
-        hf_path = "multimodal-latest"
-    elif mode == "sft":
-        upload_dir = "models/checkpoints/sft/best"
-        if not os.path.exists(upload_dir):
-            upload_dir = "models/checkpoints/sft/final"
-        hf_path = "sft-latest"
-    else:
-        upload_dir = "models/checkpoints/pretrain/best"
-        if not os.path.exists(upload_dir):
-            upload_dir = "models/checkpoints/pretrain/final"
-        hf_path = "latest"
+        # Upload image tokenizer
+        img_dir = _find_upload_dir([
+            "models/checkpoints/image_tokenizer/best",
+            "models/checkpoints/image_tokenizer/final",
+            "models/checkpoints/image_tokenizer",
+        ])
+        if img_dir:
+            print(f"Uploading image tokenizer from {img_dir}...", flush=True)
+            _upload_folder_with_retry(api, img_dir, hf_repo, "image-tokenizer",
+                                      f"image tokenizer checkpoint")
 
-    print(f"Uploading {mode} checkpoint to HuggingFace: {hf_repo}/{hf_path}...")
-    api.upload_folder(
-        folder_path=upload_dir,
-        repo_id=hf_repo,
-        path_in_repo=hf_path,
-        commit_message=f"{mode}: {result.get('total_steps', 0)} steps, "
-                      f"loss={result.get('best_val_loss', 'N/A')}, "
-                      f"stop={result.get('stop_reason', 'unknown')}",
-    )
+        # Upload audio tokenizer
+        audio_dir = _find_upload_dir([
+            "models/checkpoints/audio_tokenizer/best",
+            "models/checkpoints/audio_tokenizer/final",
+            "models/checkpoints/audio_tokenizer",
+        ])
+        if audio_dir:
+            print(f"Uploading audio tokenizer from {audio_dir}...", flush=True)
+            _upload_folder_with_retry(api, audio_dir, hf_repo, "audio-tokenizer",
+                                      f"audio tokenizer checkpoint")
+
+        # Upload multimodal model
+        mm_dir = _find_upload_dir([
+            "models/current_multimodal",
+            "models/checkpoints/multimodal/best",
+            "models/checkpoints/multimodal/final",
+            "models/checkpoints/multimodal",
+        ])
+        if mm_dir:
+            print(f"Uploading multimodal model from {mm_dir}...", flush=True)
+            _upload_folder_with_retry(api, mm_dir, hf_repo, "multimodal-latest",
+                                      f"multimodal: {result.get('total_steps', 0)} steps, "
+                                      f"loss={result.get('best_val_loss', 'N/A')}")
+        hf_path = "multimodal-latest"
+
+    elif mode == "sft":
+        upload_dir = _find_upload_dir([
+            "models/checkpoints/sft/best",
+            "models/checkpoints/sft/final",
+        ])
+        hf_path = "sft-latest"
+        if upload_dir:
+            print(f"Uploading SFT checkpoint from {upload_dir}...", flush=True)
+            _upload_folder_with_retry(api, upload_dir, hf_repo, hf_path,
+                                      f"sft: {result.get('total_steps', 0)} steps, "
+                                      f"loss={result.get('best_val_loss', 'N/A')}")
+    else:
+        upload_dir = _find_upload_dir([
+            "models/checkpoints/pretrain/best",
+            "models/checkpoints/pretrain/final",
+        ])
+        hf_path = "latest"
+        if upload_dir:
+            print(f"Uploading pretrain checkpoint from {upload_dir}...", flush=True)
+            _upload_folder_with_retry(api, upload_dir, hf_repo, hf_path,
+                                      f"pretrain: {result.get('total_steps', 0)} steps, "
+                                      f"loss={result.get('best_val_loss', 'N/A')}")
 
     # Save and upload training result
     result_file = "training_done.json"
     with open(result_file, "w") as f:
         json.dump(result, f, indent=2)
-    api.upload_file(
-        path_or_fileobj=result_file,
-        path_in_repo=f"{hf_path}/training_result.json",
-        repo_id=hf_repo,
-    )
-    print("Upload complete!")
+    try:
+        api.upload_file(
+            path_or_fileobj=result_file,
+            path_in_repo=f"{hf_path}/training_result.json",
+            repo_id=hf_repo,
+        )
+    except Exception as e:
+        print(f"WARNING: Could not upload training result: {e}", flush=True)
+    print("Upload complete!", flush=True)
 
 
 def self_destruct():
@@ -234,6 +301,27 @@ def self_destruct():
         print("Pod terminated.")
     except Exception as e:
         print(f"Could not self-destruct: {e}")
+
+
+def _incremental_upload(local_dir: str, hf_path: str, label: str):
+    """Upload a checkpoint to HF immediately (best-effort, non-blocking)."""
+    hf_token = os.environ.get("HF_TOKEN", "")
+    hf_repo = os.environ.get("HF_REPO_ID", "")
+    if not (hf_token and hf_repo):
+        return
+    d = _find_upload_dir([local_dir, f"{local_dir}/best", f"{local_dir}/final"])
+    if not d:
+        print(f"[upload] No files found in {local_dir}, skipping {label} upload", flush=True)
+        return
+    try:
+        from huggingface_hub import HfApi
+        api = HfApi(token=hf_token)
+        api.create_repo(hf_repo, private=True, exist_ok=True)
+        print(f"[upload] Uploading {label} from {d} -> {hf_repo}/{hf_path}...", flush=True)
+        _upload_folder_with_retry(api, d, hf_repo, hf_path, f"{label} checkpoint")
+        print(f"[upload] {label} uploaded successfully!", flush=True)
+    except Exception as e:
+        print(f"[upload] WARNING: {label} upload failed: {e}", flush=True)
 
 
 def run_multimodal(max_steps: int) -> dict:
@@ -272,6 +360,8 @@ def run_multimodal(max_steps: int) -> dict:
         max_steps=5000,
     )
     print(f"[multimodal] Image tokenizer done: {img_result.get('total_steps')} steps", flush=True)
+    # Upload immediately so we don't lose it if later steps fail
+    _incremental_upload("models/checkpoints/image_tokenizer", "image-tokenizer", "image tokenizer")
 
     # 4. Train audio tokenizer
     print("[multimodal] Step 4/5: Training audio tokenizer...", flush=True)
@@ -283,6 +373,7 @@ def run_multimodal(max_steps: int) -> dict:
         max_steps=3000,
     )
     print(f"[multimodal] Audio tokenizer done: {audio_result.get('total_steps')} steps", flush=True)
+    _incremental_upload("models/checkpoints/audio_tokenizer", "audio-tokenizer", "audio tokenizer")
 
     # 5. Multimodal fine-tuning
     mm_steps = max_steps if max_steps > 0 else 10000
