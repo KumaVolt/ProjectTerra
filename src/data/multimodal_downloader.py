@@ -314,9 +314,9 @@ def download_audio_data(
 
                 ds = load_dataset(**kwargs)
 
-                # Force soundfile backend for audio decoding (torchcodec has ABI issues on cloud)
+                # Disable HF's audio decoding — decode raw bytes ourselves with soundfile.
                 from datasets import Audio
-                ds = ds.cast_column(info["audio_field"], Audio(sampling_rate=info.get("target_sr", 16000)))
+                ds = ds.cast_column(info["audio_field"], Audio(decode=False))
 
                 count = 0
 
@@ -331,23 +331,12 @@ def download_audio_data(
                         if audio_data is None or not text:
                             continue
 
-                        # Extract audio array and sample rate
-                        array, sr = _extract_audio(audio_data, target_sr)
+                        array, sr = _decode_audio_bytes(audio_data, target_sr)
 
                         if array is None or len(array) < 1600:  # < 0.1s
                             continue
 
                         audio_tensor = torch.tensor(array, dtype=torch.float32)
-
-                        # Resample if needed
-                        if sr != target_sr:
-                            try:
-                                import torchaudio
-                                audio_tensor = torchaudio.functional.resample(
-                                    audio_tensor.unsqueeze(0), sr, target_sr
-                                ).squeeze(0)
-                            except ImportError:
-                                continue
 
                         # Compute mel spectrogram
                         mel = _compute_mel(audio_tensor, target_sr)
@@ -416,6 +405,55 @@ def _extract_audio(audio_data, default_sr: int = 16000) -> tuple:
         pass
 
     return None, default_sr
+
+
+def _decode_audio_bytes(audio_data, target_sr: int) -> tuple:
+    """Decode audio from raw bytes (HF decode=False format) using soundfile.
+
+    When HF datasets has decode=False, audio_data is a dict with 'bytes' and/or 'path'.
+    We decode with soundfile (libsndfile) — no torchcodec dependency.
+
+    Returns (numpy_array, sample_rate) or (None, target_sr) on failure.
+    """
+    import io
+    import numpy as np
+
+    try:
+        import soundfile as sf
+    except ImportError:
+        # Fall back to _extract_audio if soundfile not available (already decoded data)
+        return _extract_audio(audio_data, target_sr)
+
+    raw_bytes = None
+    if isinstance(audio_data, dict):
+        raw_bytes = audio_data.get("bytes")
+
+    if raw_bytes is None:
+        # Data might already be decoded (local run without decode=False)
+        return _extract_audio(audio_data, target_sr)
+
+    try:
+        array, sr = sf.read(io.BytesIO(raw_bytes), dtype="float32")
+        # Convert stereo to mono
+        if array.ndim > 1:
+            array = array.mean(axis=1)
+        # Resample if needed
+        if sr != target_sr:
+            try:
+                import torchaudio
+                t = torch.tensor(array, dtype=torch.float32).unsqueeze(0)
+                t = torchaudio.functional.resample(t, sr, target_sr).squeeze(0)
+                return t.numpy(), target_sr
+            except ImportError:
+                # Simple linear resampling fallback
+                ratio = target_sr / sr
+                new_len = int(len(array) * ratio)
+                indices = np.linspace(0, len(array) - 1, new_len)
+                array = np.interp(indices, np.arange(len(array)), array).astype(np.float32)
+                return array, target_sr
+        return array, sr
+    except Exception:
+        return None, target_sr
 
 
 def _compute_mel(
@@ -517,9 +555,10 @@ def download_tts_data(
 
                 ds = load_dataset(**kwargs)
 
-                # Force soundfile backend for audio decoding (torchcodec has ABI issues on cloud)
+                # Disable HF's audio decoding — decode raw bytes ourselves with soundfile.
+                # This avoids torchcodec entirely (ABI mismatch crashes Python on cloud).
                 from datasets import Audio
-                ds = ds.cast_column(info["audio_field"], Audio(sampling_rate=target_sr))
+                ds = ds.cast_column(info["audio_field"], Audio(decode=False))
 
                 count = 0
 
@@ -534,21 +573,12 @@ def download_tts_data(
                         if audio_data is None or not text:
                             continue
 
-                        array, sr = _extract_audio(audio_data, target_sr)
+                        array, sr = _decode_audio_bytes(audio_data, target_sr)
 
                         if array is None or len(array) < 4800:  # < 0.2s
                             continue
 
                         audio_tensor = torch.tensor(array, dtype=torch.float32)
-
-                        if sr != target_sr:
-                            try:
-                                import torchaudio
-                                audio_tensor = torchaudio.functional.resample(
-                                    audio_tensor.unsqueeze(0), sr, target_sr
-                                ).squeeze(0)
-                            except ImportError:
-                                continue
 
                         mel = _compute_mel(audio_tensor, target_sr, n_fft=1024, hop_length=256, n_mels=80)
 
