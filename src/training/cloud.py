@@ -228,7 +228,8 @@ def _runpod_launch_pod(
         "A100": "NVIDIA A100 80GB PCIe",
         "A100-SXM": "NVIDIA A100-SXM4-80GB",
         "H100": "NVIDIA H100 80GB HBM3",
-        "H200": "NVIDIA H200",
+        "H200": "NVIDIA H200 NVL",
+        "H200-SXM": "NVIDIA H200",
         "L4": "NVIDIA L4",
         "L40S": "NVIDIA L40S",
         "A40": "NVIDIA A40",
@@ -921,11 +922,11 @@ def _normalize_gpu_name(raw: str) -> str | None:
 
 # Hardcoded fallbacks (only used when APIs are unreachable)
 _FALLBACK_SPEED = {
-    "A100": 200000, "H100": 500000, "A10G": 80000,
+    "A100": 200000, "H100": 500000, "H200": 600000, "A10G": 80000,
     "L4": 50000, "T4": 25000, "RTX4090": 120000,
 }
 _FALLBACK_PRICING = {
-    "A100": 3.40, "H100": 4.76, "A10G": 1.10,
+    "A100": 3.40, "H100": 4.76, "H200": 3.39, "A10G": 1.10,
     "L4": 0.80, "T4": 0.53, "RTX4090": 0.69,
 }
 
