@@ -338,7 +338,9 @@ def run_multimodal(max_steps: int) -> dict:
 
     # 2. Download multimodal data — each modality separately so one failure doesn't kill all
     print("[multimodal] Step 2/5: Downloading multimodal data...", flush=True)
-    # Install audio support: soundfile + libsndfile (NOT torchcodec — ABI mismatch with container PyTorch)
+    # Audio support: uninstall torchcodec (ABI mismatch crashes Python), use soundfile instead
+    subprocess.run([sys.executable, "-m", "pip", "uninstall", "torchcodec", "-y", "--quiet"],
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     subprocess.run(["apt-get", "update", "-qq"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     subprocess.run(["apt-get", "install", "-y", "-qq", "ffmpeg", "libsndfile1"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     subprocess.run([sys.executable, "-m", "pip", "install", "soundfile", "--quiet"])
