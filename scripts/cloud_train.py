@@ -411,22 +411,37 @@ def run_multimodal(max_steps: int) -> dict:
     # 5. Multimodal fine-tuning
     mm_steps = max_steps if max_steps > 0 else 10000
     print(f"[multimodal] Step 5/5: Multimodal fine-tuning ({mm_steps} steps)...", flush=True)
+    print(f"[multimodal]   text_model={base_model_path}", flush=True)
     print(f"[multimodal]   image_tok={img_tok_path}, audio_tok={audio_tok_path}", flush=True)
-    from src.training.train_multimodal import train_multimodal
-    result = train_multimodal(
-        text_model_path=base_model_path,
-        image_tokenizer_path=img_tok_path,
-        audio_tokenizer_path=audio_tok_path,
-        vision_dir="data/vision" if has_vision else None,
-        audio_dir="data/tts" if has_audio else None,
-        output_dir="models/checkpoints/multimodal",
-        batch_size=16,
-        gradient_accumulation_steps=2,
-        learning_rate=1e-4,
-        max_steps=mm_steps,
-    )
-    print(f"[multimodal] All done! Result: {result}", flush=True)
-    return result
+    print(f"[multimodal]   vision_dir={'data/vision' if has_vision else None}, audio_dir={'data/tts' if has_audio else None}", flush=True)
+    try:
+        from src.training.train_multimodal import train_multimodal
+        result = train_multimodal(
+            text_model_path=base_model_path,
+            image_tokenizer_path=img_tok_path,
+            audio_tokenizer_path=audio_tok_path,
+            vision_dir="data/vision" if has_vision else None,
+            audio_dir="data/tts" if has_audio else None,
+            output_dir="models/checkpoints/multimodal",
+            batch_size=16,
+            gradient_accumulation_steps=2,
+            learning_rate=1e-4,
+            max_steps=mm_steps,
+        )
+        print(f"[multimodal] All done! Result: {result}", flush=True)
+        return result
+    except Exception as e:
+        import traceback
+        print(f"[multimodal] Step 5 FAILED: {e}", flush=True)
+        traceback.print_exc()
+        # Return partial result so tokenizers still get uploaded in main()
+        return {
+            "total_steps": 0,
+            "error": str(e),
+            "image_tokenizer": img_tok_path,
+            "audio_tokenizer": audio_tok_path,
+            "stop_reason": "step5_crash",
+        }
 
 
 def main():
@@ -456,9 +471,31 @@ def main():
         upload_to_hf(result, mode)
 
     except Exception as e:
-        print(f"[cloud_train] FATAL ERROR: {e}", flush=True)
         import traceback
-        traceback.print_exc()
+        error_msg = traceback.format_exc()
+        print(f"[cloud_train] FATAL ERROR: {e}", flush=True)
+        print(error_msg, flush=True)
+
+        # Upload crash log to HF so we can always see what went wrong
+        hf_token = os.environ.get("HF_TOKEN", "")
+        hf_repo = os.environ.get("HF_REPO_ID", "")
+        if hf_token and hf_repo:
+            try:
+                from huggingface_hub import HfApi
+                api = HfApi(token=hf_token)
+                api.create_repo(hf_repo, private=True, exist_ok=True)
+                import time as _time
+                crash_file = f"crash_log_{int(_time.time())}.txt"
+                with open(crash_file, "w") as f:
+                    f.write(f"mode={mode}\nmax_steps={max_steps}\n\n{error_msg}\n")
+                api.upload_file(
+                    path_or_fileobj=crash_file,
+                    path_in_repo=f"logs/{crash_file}",
+                    repo_id=hf_repo,
+                )
+                print(f"[cloud_train] Crash log uploaded to HF: logs/{crash_file}", flush=True)
+            except Exception:
+                pass
 
     self_destruct()
 
