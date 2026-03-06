@@ -154,7 +154,7 @@ class GLMClient:
     ):
         self.api_key = os.environ["GLM_API_KEY"]
         self.base_url = base_url or os.environ.get(
-            "GLM_API_BASE", "https://api.z.ai/v1"
+            "GLM_API_BASE", "https://open.bigmodel.cn/api/paas/v4"
         )
         self.model = model
         self.total_tokens_used = 0

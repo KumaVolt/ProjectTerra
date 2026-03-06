@@ -89,7 +89,7 @@ llm_resources:
       - evaluation
       - code_review
   glm:  # Optional: set GLM_API_KEY to enable
-    base_url: "https://api.z.ai/v1"
+    base_url: "https://open.bigmodel.cn/api/paas/v4"
     model: "glm-4-plus"
     max_tokens_per_session: 100000
     tasks:

@@ -51,27 +51,46 @@ def _call_claude(prompt: str, system: str, max_tokens: int, api_key: str) -> str
 
 
 def _call_glm(prompt: str, system: str, max_tokens: int, api_key: str) -> str:
-    base_url = os.environ.get("GLM_API_BASE", "https://api.z.ai/v1")
+    base_url = os.environ.get("GLM_API_BASE", "https://open.bigmodel.cn/api/paas/v4")
     messages = []
     if system:
         messages.append({"role": "system", "content": system})
     messages.append({"role": "user", "content": prompt})
 
-    with httpx.Client(timeout=120) as client:
-        resp = client.post(
-            f"{base_url}/chat/completions",
-            json={"model": "glm-4-plus", "max_tokens": max_tokens, "messages": messages},
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
-        )
-        resp.raise_for_status()
-        data = resp.json()
+    # Try multiple known GLM API endpoints
+    urls_to_try = [
+        base_url,
+        "https://open.bigmodel.cn/api/paas/v4",
+        "https://api.z.ai/v1",
+    ]
+    # Deduplicate while preserving order
+    seen = set()
+    urls_to_try = [u for u in urls_to_try if not (u in seen or seen.add(u))]
 
-    usage = data.get("usage", {})
-    print(f"[triage] LLM=glm tokens={usage.get('total_tokens', 0)}")
-    return data["choices"][0]["message"]["content"]
+    last_error = None
+    for url in urls_to_try:
+        try:
+            with httpx.Client(timeout=120) as client:
+                resp = client.post(
+                    f"{url}/chat/completions",
+                    json={"model": "glm-4-plus", "max_tokens": max_tokens, "messages": messages},
+                    headers={
+                        "Authorization": f"Bearer {api_key}",
+                        "Content-Type": "application/json",
+                    },
+                )
+                resp.raise_for_status()
+                data = resp.json()
+
+            usage = data.get("usage", {})
+            print(f"[triage] LLM=glm url={url} tokens={usage.get('total_tokens', 0)}")
+            return data["choices"][0]["message"]["content"]
+        except Exception as e:
+            last_error = e
+            print(f"[triage] GLM endpoint {url} failed: {e}")
+            continue
+
+    raise RuntimeError(f"All GLM endpoints failed. Last error: {last_error}")
 
 
 def load_context():
