@@ -9,7 +9,7 @@ This script runs on a RunPod/cloud GPU. It:
 
 Environment variables (set by the pod):
     REPO_URL - Git repo to clone
-    TRAINING_MODE - "pretrain" or "sft" (default: pretrain)
+    TRAINING_MODE - "pretrain", "sft", or "multimodal" (default: pretrain)
     TRAINING_MAX_STEPS - Max steps (0 = auto)
     SFT_MAX_SAMPLES - Max SFT training samples (default: 20000)
     HF_TOKEN - HuggingFace token for upload
@@ -177,7 +177,12 @@ def upload_to_hf(result: dict, mode: str):
     api.create_repo(hf_repo, private=True, exist_ok=True)
 
     # Determine upload directory and HF path
-    if mode == "sft":
+    if mode == "multimodal":
+        upload_dir = "models/current_multimodal"
+        if not os.path.exists(upload_dir):
+            upload_dir = "models/checkpoints/multimodal/best"
+        hf_path = "multimodal-latest"
+    elif mode == "sft":
         upload_dir = "models/checkpoints/sft/best"
         if not os.path.exists(upload_dir):
             upload_dir = "models/checkpoints/sft/final"
@@ -231,6 +236,58 @@ def self_destruct():
         print(f"Could not self-destruct: {e}")
 
 
+def run_multimodal(max_steps: int) -> dict:
+    """Run the full multimodal pipeline: tokenizers + unified fine-tuning."""
+    # 1. Get base text model
+    base_model_path = _find_or_download_base_model()
+
+    # 2. Download multimodal data
+    print("Downloading multimodal training data...")
+    subprocess.run([sys.executable, "-c",
+        "from src.data.multimodal_downloader import download_all_multimodal_data; download_all_multimodal_data(minimal=False)"],
+        check=True)
+
+    # 3. Train image tokenizer
+    print("Training image tokenizer...")
+    from src.training.train_multimodal import train_image_tokenizer
+    img_result = train_image_tokenizer(
+        data_dir="data/vision",
+        output_dir="models/checkpoints/image_tokenizer",
+        batch_size=32,
+        max_steps=5000,
+    )
+    print(f"Image tokenizer done: {img_result.get('total_steps')} steps")
+
+    # 4. Train audio tokenizer
+    print("Training audio tokenizer...")
+    from src.training.train_multimodal import train_audio_tokenizer
+    audio_result = train_audio_tokenizer(
+        data_dir="data/tts",
+        output_dir="models/checkpoints/audio_tokenizer",
+        batch_size=16,
+        max_steps=3000,
+    )
+    print(f"Audio tokenizer done: {audio_result.get('total_steps')} steps")
+
+    # 5. Multimodal fine-tuning
+    mm_steps = max_steps if max_steps > 0 else 10000
+    print(f"Starting multimodal fine-tuning ({mm_steps} steps)...")
+    from src.training.train_multimodal import train_multimodal
+    result = train_multimodal(
+        text_model_path=base_model_path,
+        image_tokenizer_path="models/checkpoints/image_tokenizer/best",
+        audio_tokenizer_path="models/checkpoints/audio_tokenizer/best",
+        vision_dir="data/vision",
+        audio_dir="data/tts",
+        output_dir="models/checkpoints/multimodal",
+        batch_size=16,
+        gradient_accumulation_steps=2,
+        learning_rate=1e-4,
+        max_steps=mm_steps,
+    )
+    return result
+
+
 def main():
     mode = os.environ.get("TRAINING_MODE", "pretrain")
     max_steps = int(os.environ.get("TRAINING_MAX_STEPS", "0"))
@@ -240,6 +297,8 @@ def main():
 
     if mode == "sft":
         result = run_sft(max_steps, max_samples)
+    elif mode == "multimodal":
+        result = run_multimodal(max_steps)
     else:
         result = run_pretrain(max_steps)
 

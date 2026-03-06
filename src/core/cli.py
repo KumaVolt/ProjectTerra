@@ -30,19 +30,49 @@ def evolve(
 @app.command()
 def train_tokenizer(
     vocab_size: int = typer.Option(32000, help="Vocabulary size"),
-    num_samples: int = typer.Option(100000, help="Number of text samples to train on"),
+    num_samples: int = typer.Option(1000000, help="Number of text samples to train on"),
     output_dir: str = typer.Option("models/tokenizer", help="Output directory"),
+    diverse: bool = typer.Option(True, help="Use diverse data mix (English + code + multilingual)"),
 ):
-    """Train a BPE tokenizer from scratch."""
+    """Train a BPE tokenizer from scratch on diverse data."""
     from src.training.tokenizer import train_from_datasets
 
-    console.print(f"[bold]Training tokenizer[/bold] (vocab_size={vocab_size}, samples={num_samples})")
+    console.print(f"[bold]Training tokenizer[/bold] (vocab_size={vocab_size}, samples={num_samples}, diverse={diverse})")
     tokenizer = train_from_datasets(
         vocab_size=vocab_size,
         num_samples=num_samples,
         output_dir=output_dir,
+        diverse=diverse,
     )
     console.print(f"[bold green]Tokenizer trained: {tokenizer.get_vocab_size()} tokens[/bold green]")
+
+    # Auto-benchmark
+    from src.training.tokenizer import benchmark_tokenizer
+    results = benchmark_tokenizer(output_dir)
+    console.print(f"\n[bold]Tokenizer Quality:[/bold]")
+    for domain, stats in results.items():
+        tpw = stats['tokens_per_word']
+        color = "green" if tpw < 1.5 else "yellow" if tpw < 2.0 else "red"
+        console.print(f"  {domain:15s} [{color}]{tpw:.2f} tok/word[/{color}] ({stats['tokens']} tokens for {stats['words']} words)")
+        if "digit_tokens" in stats:
+            console.print(f"                  digits: {stats['digit_tokens']}")
+
+
+@app.command()
+def benchmark_tok(
+    tokenizer_path: str = typer.Option("models/tokenizer", help="Tokenizer path"),
+):
+    """Benchmark tokenizer quality on different domains."""
+    from src.training.tokenizer import benchmark_tokenizer
+
+    results = benchmark_tokenizer(tokenizer_path)
+    console.print(f"[bold]Tokenizer Benchmark[/bold] ({tokenizer_path})\n")
+    for domain, stats in results.items():
+        tpw = stats['tokens_per_word']
+        color = "green" if tpw < 1.5 else "yellow" if tpw < 2.0 else "red"
+        console.print(f"  {domain:15s} [{color}]{tpw:.2f} tok/word[/{color}]  |  {stats['tokens']} tokens / {stats['words']} words / {stats['chars']} chars")
+        if "digit_tokens" in stats:
+            console.print(f"                  digit splitting: {stats['digit_tokens']}")
 
 
 @app.command()
@@ -827,6 +857,162 @@ def test_tts(
 
     console.print(f"[green]Speech saved to {output_path}[/green]")
     console.print("[dim](Note: quality depends on training. Untrained model produces noise.)[/dim]")
+
+
+@app.command()
+def train_image_tok(
+    data_dir: str = typer.Option("data/vision", help="Vision data directory"),
+    output_dir: str = typer.Option("models/checkpoints/image_tokenizer", help="Output directory"),
+    batch_size: int = typer.Option(16, help="Batch size"),
+    max_steps: int = typer.Option(10000, help="Max training steps (0 = auto)"),
+    learning_rate: float = typer.Option(3e-4, help="Learning rate"),
+    image_size: int = typer.Option(256, help="Image size"),
+    codebook_size: int = typer.Option(8192, help="VQ codebook size"),
+):
+    """Train the image VQ-VAE tokenizer (unified architecture)."""
+    from src.training.train_multimodal import train_image_tokenizer
+
+    console.print(f"[bold]Training image VQ-VAE tokenizer (codebook={codebook_size})...[/bold]")
+    result = train_image_tokenizer(
+        data_dir=data_dir, output_dir=output_dir,
+        batch_size=batch_size, learning_rate=learning_rate,
+        max_steps=max_steps, image_size=image_size,
+        codebook_size=codebook_size,
+    )
+    console.print(f"[bold green]Image tokenizer training complete.[/bold green]")
+    console.print(f"  Steps: {result['total_steps']}, Best val loss: {result.get('best_val_loss', 'N/A')}")
+
+
+@app.command()
+def train_audio_tok(
+    data_dir: str = typer.Option("data/tts", help="Audio data directory"),
+    output_dir: str = typer.Option("models/checkpoints/audio_tokenizer", help="Output directory"),
+    batch_size: int = typer.Option(8, help="Batch size"),
+    max_steps: int = typer.Option(5000, help="Max training steps (0 = auto)"),
+    learning_rate: float = typer.Option(3e-4, help="Learning rate"),
+):
+    """Train the audio codec tokenizer (unified architecture)."""
+    from src.training.train_multimodal import train_audio_tokenizer
+
+    console.print(f"[bold]Training audio codec tokenizer...[/bold]")
+    result = train_audio_tokenizer(
+        data_dir=data_dir, output_dir=output_dir,
+        batch_size=batch_size, learning_rate=learning_rate,
+        max_steps=max_steps,
+    )
+    console.print(f"[bold green]Audio tokenizer training complete.[/bold green]")
+    console.print(f"  Steps: {result['total_steps']}, Best val loss: {result.get('best_val_loss', 'N/A')}")
+
+
+@app.command()
+def train_multimodal(
+    text_model_path: str = typer.Option(None, help="Pre-trained text model path (auto-detects)"),
+    image_tokenizer_path: str = typer.Option("models/checkpoints/image_tokenizer/best", help="Image tokenizer path"),
+    audio_tokenizer_path: str = typer.Option("models/checkpoints/audio_tokenizer/best", help="Audio tokenizer path"),
+    vision_dir: str = typer.Option("data/vision", help="Vision data directory"),
+    audio_dir: str = typer.Option("data/tts", help="Audio data directory"),
+    output_dir: str = typer.Option("models/checkpoints/multimodal", help="Output directory"),
+    batch_size: int = typer.Option(4, help="Micro batch size"),
+    grad_accum: int = typer.Option(4, help="Gradient accumulation steps"),
+    learning_rate: float = typer.Option(1e-4, help="Learning rate"),
+    max_steps: int = typer.Option(10000, help="Max training steps (0 = auto)"),
+    max_seq_len: int = typer.Option(512, help="Max sequence length"),
+    depth_loss_weight: float = typer.Option(1.0, help="Weight for depth transformer loss"),
+):
+    """Multimodal fine-tuning: train unified model on interleaved text+image+audio."""
+    from src.training.train_multimodal import train_multimodal as run_mm
+
+    # Auto-detect text model
+    if text_model_path is None:
+        candidates = [
+            "models/current",
+            "models/checkpoints/sft/best",
+            "models/checkpoints/pretrain/best/latest",
+            "models/checkpoints/pretrain/best",
+            "models/checkpoints/pretrain/final",
+        ]
+        for c in candidates:
+            if Path(c).exists() and (Path(c) / "config.json").exists():
+                text_model_path = c
+                break
+        if text_model_path is None:
+            console.print("[red]No text model found. Run 'terra pretrain' or 'terra sft' first.[/red]")
+            raise typer.Exit(1)
+
+    console.print(f"[bold]Multimodal fine-tuning[/bold]")
+    console.print(f"  Text model: {text_model_path}")
+    console.print(f"  Image tokenizer: {image_tokenizer_path}")
+    console.print(f"  Audio tokenizer: {audio_tokenizer_path}")
+
+    result = run_mm(
+        text_model_path=text_model_path,
+        image_tokenizer_path=image_tokenizer_path,
+        audio_tokenizer_path=audio_tokenizer_path,
+        vision_dir=vision_dir,
+        audio_dir=audio_dir,
+        output_dir=output_dir,
+        batch_size=batch_size,
+        gradient_accumulation_steps=grad_accum,
+        learning_rate=learning_rate,
+        max_steps=max_steps,
+        max_seq_len=max_seq_len,
+        depth_loss_weight=depth_loss_weight,
+    )
+
+    console.print(f"\n[bold green]Multimodal fine-tuning complete![/bold green]")
+    console.print(f"  Steps: {result.get('total_steps', '?')}")
+    console.print(f"  Best val loss: {result.get('best_val_loss', 'N/A')}")
+    console.print(f"  Model saved to: {result.get('model_path', output_dir)}")
+
+
+@app.command()
+def cloud_multimodal(
+    gpu: str = typer.Option("A100", help="GPU type: A100, H100, L4, RTX4090"),
+    max_steps: int = typer.Option(0, help="Training steps (0 = auto, 10K)"),
+    estimate_only: bool = typer.Option(False, "--estimate", help="Only show cost estimate"),
+    async_mode: bool = typer.Option(True, "--async/--sync", help="Async mode (safe to close laptop)"),
+):
+    """Train multimodal model on cloud GPU. Trains tokenizers + unified model."""
+    from src.training.cloud import estimate_cost
+
+    display_steps = max_steps if max_steps > 0 else 10000
+
+    est = estimate_cost(gpu, display_steps)
+    console.print(f"[bold]Cloud multimodal training estimate:[/bold]")
+    console.print(f"  GPU: {est['gpu']}")
+    console.print(f"  Rate: ${est['cost_per_hour']}/hr")
+    console.print(f"  Time: ~{est['estimated_hours']} hours")
+    console.print(f"  Cost: ~${est['estimated_cost_usd']:.2f}")
+    console.print(f"  Pipeline: image_tok -> audio_tok -> multimodal finetune")
+    if async_mode:
+        console.print(f"  Mode: [cyan]async (safe to close laptop)[/cyan]")
+
+    if estimate_only:
+        return
+
+    if not typer.confirm(f"\nProceed with ~${est['estimated_cost_usd']:.2f} cloud multimodal training?"):
+        console.print("Cancelled.")
+        return
+
+    from src.training.cloud import _runpod_launch_pod
+
+    result = _runpod_launch_pod(
+        gpu=gpu,
+        max_steps=max_steps,
+        async_mode=async_mode,
+        mode="multimodal",
+        extra_env=[],
+    )
+
+    if async_mode:
+        console.print(f"\n[bold green]Multimodal job submitted![/bold green]")
+        console.print("  The pod will:")
+        console.print("  1. Download base model + multimodal data")
+        console.print("  2. Train image & audio tokenizers")
+        console.print("  3. Run multimodal fine-tuning")
+        console.print("  4. Upload to HF and self-destruct")
+        console.print("\n  Check progress: terra cloud-status")
+        console.print("  Download results: terra cloud-download")
 
 
 @app.command()
