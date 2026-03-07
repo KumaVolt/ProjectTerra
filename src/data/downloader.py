@@ -143,7 +143,7 @@ def download_pretraining_data(
                         count += 1
 
                     if count % 10000 == 0 and count > 0:
-                        print(f"  [{source_name}] {count}/{max_samples_per_source}")
+                        print(f"  [{source_name}] {count}/{max_samples_per_source}", flush=True)
 
             print(f"[download] {source_name}: saved {count} samples to {output_file}")
             result[source_name] = str(output_file)
@@ -242,7 +242,9 @@ def prepare_pretraining_chunks(
 
     with open(output_file, "w") as out_f:
         for fpath, ratio in text_files:
-            print(f"[chunk] Tokenizing {fpath.name}...")
+            file_size_mb = fpath.stat().st_size / (1024 * 1024)
+            print(f"[chunk] Tokenizing {fpath.name} ({file_size_mb:.0f} MB)...", flush=True)
+            lines_processed = 0
             with open(fpath, encoding="utf-8") as f:
                 for line in f:
                     line = line.strip()
@@ -254,6 +256,10 @@ def prepare_pretraining_chunks(
                     buffer.extend(encoded.ids)
                     if eos_id is not None:
                         buffer.append(eos_id)
+                    lines_processed += 1
+
+                    if lines_processed % 100000 == 0:
+                        print(f"[chunk]   {fpath.name}: {lines_processed:,} lines, {num_chunks:,} chunks so far...", flush=True)
 
                     # Flush complete chunks from buffer
                     while len(buffer) >= chunk_size:
@@ -263,8 +269,7 @@ def prepare_pretraining_chunks(
                         num_chunks += 1
                         total_tokens += chunk_size
 
-                        if num_chunks % 10000 == 0:
-                            print(f"[chunk] {num_chunks:,} chunks ({total_tokens:,} tokens)...")
+            print(f"[chunk]   {fpath.name} done: {lines_processed:,} lines processed", flush=True)
 
     print(f"[chunk] Total tokens: {total_tokens:,}, chunks: {num_chunks:,}")
     print(f"[chunk] Saved {num_chunks} chunks to {output_file}")
