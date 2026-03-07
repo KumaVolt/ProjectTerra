@@ -33,6 +33,7 @@ def cloud_pretrain(
     gpu_count: int = 1,
     data_scale: str = "small",
     model_preset: str = "",
+    network_volume_id: str = "",
 ) -> dict:
     """Run pre-training on a cloud GPU pod.
 
@@ -58,7 +59,7 @@ def cloud_pretrain(
     if provider == "modal":
         return _modal_pretrain(config_path, gpu, max_steps, sync_checkpoint, async_mode)
     elif provider == "runpod":
-        return _runpod_pretrain(config_path, gpu, max_steps, sync_checkpoint, async_mode, gpu_count=gpu_count, extra_env=extra_env)
+        return _runpod_pretrain(config_path, gpu, max_steps, sync_checkpoint, async_mode, gpu_count=gpu_count, extra_env=extra_env, network_volume_id=network_volume_id)
     else:
         raise ValueError(f"Unknown provider: {provider}. Use 'modal' or 'runpod'.")
 
@@ -225,7 +226,7 @@ def _runpod_graphql(client, headers, query: str, variables: dict = None) -> dict
 def _runpod_launch_pod(
     gpu: str, max_steps: int, async_mode: bool = True,
     mode: str = "pretrain", extra_env: list = None,
-    gpu_count: int = 1,
+    gpu_count: int = 1, network_volume_id: str = "",
 ) -> dict:
     """Launch a RunPod GPU pod for training (pretrain or SFT).
 
@@ -286,20 +287,22 @@ def _runpod_launch_pod(
     if extra_env:
         env.extend(extra_env)
 
-    variables = {
-        "input": {
-            "name": pod_name,
-            "imageName": "runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04",
-            "gpuTypeId": gpu_id,
-            "gpuCount": gpu_count,
-            "volumeInGb": 0,
-            "containerDiskInGb": 200 if mode == "pretrain" else 50,
-            "minVcpuCount": 1,
-            "minMemoryInGb": 1,
-            "dockerArgs": docker_args,
-            "env": env,
-        },
+    pod_input = {
+        "name": pod_name,
+        "imageName": "runpod/pytorch:2.6.0-py3.11-cuda12.4.1-devel-ubuntu22.04",
+        "gpuTypeId": gpu_id,
+        "gpuCount": gpu_count,
+        "volumeInGb": 0,
+        "containerDiskInGb": 50 if network_volume_id else (200 if mode == "pretrain" else 50),
+        "minVcpuCount": 1,
+        "minMemoryInGb": 1,
+        "dockerArgs": docker_args,
+        "env": env,
     }
+    if network_volume_id:
+        pod_input["networkVolumeId"] = network_volume_id
+
+    variables = {"input": pod_input}
 
     resp = client.post(
         "https://api.runpod.io/graphql",
@@ -340,10 +343,10 @@ def _runpod_launch_pod(
 
 def _runpod_pretrain(
     config_path: str, gpu: str, max_steps: int, sync_checkpoint: bool, async_mode: bool,
-    gpu_count: int = 1, extra_env: list = None,
+    gpu_count: int = 1, extra_env: list = None, network_volume_id: str = "",
 ) -> dict:
     """Run pre-training on a RunPod GPU pod."""
-    result = _runpod_launch_pod(gpu=gpu, max_steps=max_steps, async_mode=async_mode, mode="pretrain", gpu_count=gpu_count, extra_env=extra_env)
+    result = _runpod_launch_pod(gpu=gpu, max_steps=max_steps, async_mode=async_mode, mode="pretrain", gpu_count=gpu_count, extra_env=extra_env, network_volume_id=network_volume_id)
 
     if async_mode:
         return result

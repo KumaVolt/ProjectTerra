@@ -168,6 +168,7 @@ def cloud_train(
     model_preset: str = typer.Option("", "--model", help="Model preset: terra_150m, terra_2b, etc. (default: from config)"),
     estimate_only: bool = typer.Option(False, "--estimate", help="Only show cost estimate"),
     async_mode: bool = typer.Option(True, "--async/--sync", help="Async mode (safe to close laptop)"),
+    network_volume: str = typer.Option("", "--network-volume", help="RunPod Network Volume ID (skips data re-download)"),
 ):
     """Pre-train on a cloud GPU. Creates pod, trains, uploads to HF, self-destructs."""
     from src.training.cloud import cloud_pretrain, estimate_cost
@@ -212,7 +213,7 @@ def cloud_train(
         console.print("Cancelled.")
         return
 
-    result = cloud_pretrain(config, provider=provider, gpu=gpu, max_steps=max_steps, async_mode=async_mode, gpu_count=gpu_count, data_scale=data_scale, model_preset=model_preset)
+    result = cloud_pretrain(config, provider=provider, gpu=gpu, max_steps=max_steps, async_mode=async_mode, gpu_count=gpu_count, data_scale=data_scale, model_preset=model_preset, network_volume_id=network_volume)
 
     if async_mode:
         console.print(f"\n[bold green]Job submitted![/bold green]")
@@ -231,6 +232,7 @@ def cloud_sft(
     max_samples: int = typer.Option(20000, help="Max SFT training samples"),
     estimate_only: bool = typer.Option(False, "--estimate", help="Only show cost estimate"),
     async_mode: bool = typer.Option(True, "--async/--sync", help="Async mode (safe to close laptop)"),
+    network_volume: str = typer.Option("", "--network-volume", help="RunPod Network Volume ID (skips data re-download)"),
 ):
     """Fine-tune on cloud GPU. Downloads base model from HF, runs SFT, uploads result."""
     from src.training.cloud import estimate_cost
@@ -973,6 +975,7 @@ def cloud_multimodal(
     max_steps: int = typer.Option(0, help="Training steps (0 = auto, 10K)"),
     estimate_only: bool = typer.Option(False, "--estimate", help="Only show cost estimate"),
     async_mode: bool = typer.Option(True, "--async/--sync", help="Async mode (safe to close laptop)"),
+    network_volume: str = typer.Option("", "--network-volume", help="RunPod Network Volume ID (skips data re-download)"),
 ):
     """Train multimodal model on cloud GPU. Trains tokenizers + unified model."""
     from src.training.cloud import estimate_cost
