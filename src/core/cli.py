@@ -184,7 +184,7 @@ def cloud_train(
             display_steps = 1000  # rough fallback
             console.print("[yellow]No local data found to calculate steps. Using estimate of ~1000 steps.[/yellow]")
 
-    est = estimate_cost(gpu, display_steps, provider=provider)
+    est = estimate_cost(gpu, display_steps, mode="pretrain", provider=provider)
     source = est['pricing_source']
     source_label = {
         "runpod_api": "[green]live from RunPod API[/green]",
@@ -236,7 +236,7 @@ def cloud_sft(
     # SFT is faster than pre-training — estimate ~2000 steps
     display_steps = max_steps if max_steps > 0 else 2000
 
-    est = estimate_cost(gpu, display_steps)
+    est = estimate_cost(gpu, display_steps, mode="sft")
     console.print(f"[bold]Cloud SFT estimate:[/bold]")
     console.print(f"  GPU: {est['gpu']}")
     console.print(f"  Rate: ${est['cost_per_hour']}/hr")
@@ -977,7 +977,7 @@ def cloud_multimodal(
 
     display_steps = max_steps if max_steps > 0 else 10000
 
-    est = estimate_cost(gpu, display_steps)
+    est = estimate_cost(gpu, display_steps, mode="multimodal")
     console.print(f"[bold]Cloud multimodal training estimate:[/bold]")
     console.print(f"  GPU: {est['gpu']}")
     console.print(f"  Rate: ${est['cost_per_hour']}/hr")

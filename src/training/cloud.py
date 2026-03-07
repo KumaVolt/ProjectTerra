@@ -921,26 +921,33 @@ def _normalize_gpu_name(raw: str) -> str | None:
 
 
 # Hardcoded fallbacks (only used when APIs are unreachable)
-_FALLBACK_SPEED = {
-    "A100": 200000, "H100": 500000, "H200": 600000, "A10G": 80000,
-    "L4": 50000, "T4": 25000, "RTX4090": 120000,
+# Speed = seconds per training step (measured from actual runs, NOT tokens/sec)
+_FALLBACK_STEP_TIME = {
+    "A100": 1.2, "H100": 0.8, "H200": 0.7, "A10G": 2.5,
+    "L4": 4.0, "T4": 8.0, "RTX4090": 1.5,
 }
 _FALLBACK_PRICING = {
     "A100": 3.40, "H100": 4.76, "H200": 3.39, "A10G": 1.10,
     "L4": 0.80, "T4": 0.53, "RTX4090": 0.69,
+}
+# Overhead for data download, tokenizer training, pip install, model upload (minutes)
+_OVERHEAD_MINUTES = {
+    "pretrain": 10,
+    "sft": 10,
+    "multimodal": 30,  # includes image + audio tokenizer training
 }
 
 
 def estimate_cost(
     gpu: str,
     max_steps: int,
-    tokens_per_step: int = 65536,
+    mode: str = "pretrain",
     provider: str | None = None,
 ) -> dict:
-    """Estimate cloud training cost using live pricing when available.
+    """Estimate cloud training cost based on measured step times.
 
-    Tries to fetch real-time pricing from Modal/RunPod APIs.
-    Falls back to hardcoded estimates if APIs are unreachable.
+    Uses seconds-per-step from actual training runs + fixed overhead
+    for data download, tokenizer training, pip install, and model upload.
     """
     live_prices = {}
     pricing_source = "fallback"
@@ -961,17 +968,19 @@ def estimate_cost(
     if gpu not in live_prices:
         pricing_source = "fallback"
 
-    tps = _FALLBACK_SPEED.get(gpu, 100000)
-    total_tokens = max_steps * tokens_per_step
-    hours = total_tokens / tps / 3600
-    cost = hours * cost_per_hr
+    secs_per_step = _FALLBACK_STEP_TIME.get(gpu, 1.0)
+    overhead_min = _OVERHEAD_MINUTES.get(mode, 10)
+    training_hours = (max_steps * secs_per_step) / 3600
+    total_hours = training_hours + (overhead_min / 60)
+    cost = total_hours * cost_per_hr
 
     return {
         "gpu": gpu,
-        "estimated_hours": round(hours, 2),
+        "estimated_hours": round(total_hours, 2),
         "estimated_cost_usd": round(cost, 2),
         "cost_per_hour": round(cost_per_hr, 3),
-        "total_tokens": total_tokens,
-        "tokens_per_second": tps,
+        "training_hours": round(training_hours, 2),
+        "overhead_minutes": overhead_min,
+        "secs_per_step": secs_per_step,
         "pricing_source": pricing_source,
     }
