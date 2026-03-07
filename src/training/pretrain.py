@@ -27,30 +27,41 @@ except ImportError:
 
 
 class PretrainDataset(Dataset):
-    """Dataset of pre-tokenized chunks for pre-training."""
+    """Dataset of pre-tokenized chunks for pre-training.
+
+    Lazy-loading: stores byte offsets into the JSONL file instead of
+    loading all tensors into RAM. Constant memory regardless of dataset size.
+    File handles opened per-access so DataLoader multiprocessing is safe.
+    """
 
     def __init__(self, data_path: str):
-        self.chunks = []
         path = Path(data_path)
+        files = list(path.glob("*.jsonl")) if path.is_dir() else [path]
+        self._file_paths = [str(f) for f in files]
 
-        if path.is_dir():
-            files = list(path.glob("*.jsonl"))
-        else:
-            files = [path]
+        # Store (file_index, byte_offset) for each chunk — ~48MB for 6M chunks
+        self._offsets: list[tuple[int, int]] = []
+        for fi, f in enumerate(files):
+            with open(f, "rb") as fh:
+                while True:
+                    offset = fh.tell()
+                    line = fh.readline()
+                    if not line:
+                        break
+                    if line.strip():
+                        self._offsets.append((fi, offset))
 
-        for f in files:
-            with open(f) as fh:
-                for line in fh:
-                    data = json.loads(line)
-                    self.chunks.append(torch.tensor(data["input_ids"], dtype=torch.long))
-
-        print(f"Loaded {len(self.chunks)} training chunks")
+        print(f"Indexed {len(self._offsets):,} training chunks (lazy, no RAM load)")
 
     def __len__(self):
-        return len(self.chunks)
+        return len(self._offsets)
 
     def __getitem__(self, idx):
-        input_ids = self.chunks[idx]
+        fi, offset = self._offsets[idx]
+        with open(self._file_paths[fi], "rb") as fh:
+            fh.seek(offset)
+            data = json.loads(fh.readline())
+        input_ids = torch.tensor(data["input_ids"], dtype=torch.long)
         return {"input_ids": input_ids, "labels": input_ids.clone()}
 
 
