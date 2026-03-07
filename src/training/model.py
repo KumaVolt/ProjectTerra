@@ -68,6 +68,17 @@ class TerraConfig:
         )
 
     @classmethod
+    def terra_2b(cls) -> "TerraConfig":
+        """~2.1B params - fits RTX 5090 32GB with gradient checkpointing."""
+        return cls(
+            hidden_size=2560,
+            intermediate_size=6912,
+            num_hidden_layers=30,
+            num_attention_heads=20,
+            num_key_value_heads=4,
+        )
+
+    @classmethod
     def terra_3b(cls) -> "TerraConfig":
         """~3B params - final target."""
         return cls(

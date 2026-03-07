@@ -41,21 +41,35 @@ def setup_repo():
 
 
 def ensure_pretrain_data():
-    """Download and prepare pre-training data if not present."""
+    """Download and prepare pre-training data if not present.
+
+    Uses TRAINING_DATA_SCALE env var to control data size:
+    - "small" (default): 50K samples/source, ~250M tokens (original 5 sources)
+    - "large": 2M samples/source, ~10B tokens (all sources including extended)
+    """
     if os.path.exists("data/pretrain_chunks/train.jsonl"):
         return
 
-    print("No training data found. Initializing pipeline...")
+    scale = os.environ.get("TRAINING_DATA_SCALE", "small")
+    print(f"No training data found. Initializing pipeline (scale={scale})...")
 
     if not os.path.exists("models/tokenizer/tokenizer.json"):
         print("Training tokenizer...")
+        tok_samples = 500000 if scale == "large" else 100000
         subprocess.run([sys.executable, "-c",
-            "from src.training.tokenizer import train_from_datasets; train_from_datasets(num_samples=100000)"],
+            f"from src.training.tokenizer import train_from_datasets; train_from_datasets(num_samples={tok_samples})"],
             check=True)
 
-    print("Downloading pre-training data...")
+    if scale == "large":
+        max_samples = 2000000
+        sources = '["fineweb_edu", "fineweb", "wikipedia", "starcoder_python", "openwebmath", "cosmopedia", "slim_orca"]'
+    else:
+        max_samples = 50000
+        sources = "None"
+
+    print(f"Downloading pre-training data ({max_samples} samples/source)...")
     subprocess.run([sys.executable, "-c",
-        "from src.data.downloader import download_pretraining_data; download_pretraining_data(max_samples_per_source=50000)"],
+        f"from src.data.downloader import download_pretraining_data; download_pretraining_data(max_samples_per_source={max_samples}, sources={sources})"],
         check=True)
 
     print("Preparing training chunks...")
@@ -65,16 +79,91 @@ def ensure_pretrain_data():
 
 
 def run_pretrain(max_steps: int) -> dict:
-    """Run pre-training from scratch."""
+    """Run pre-training from scratch.
+
+    If TRAINING_GPU_COUNT > 1, launches via `accelerate launch` for multi-GPU DDP.
+    """
     ensure_pretrain_data()
 
-    print(f"Starting pre-training (max_steps={max_steps})...")
+    gpu_count = int(os.environ.get("TRAINING_GPU_COUNT", "1"))
+
+    if gpu_count > 1:
+        # Multi-GPU: launch this same file with accelerate
+        print(f"Starting multi-GPU pre-training ({gpu_count} GPUs, max_steps={max_steps})...")
+        # Write a small launcher script that accelerate will run on each process
+        launcher = "/workspace/terra/_multigpu_pretrain.py"
+        with open(launcher, "w") as f:
+            f.write(f"""
+import yaml
+from src.training.pretrain import pretrain
+config = yaml.safe_load(open("configs/terra.yaml"))
+result = pretrain(
+    model_config=config.get("architecture", {{}}),
+    data_path="data/pretrain_chunks",
+    output_dir="models/checkpoints/pretrain",
+    batch_size=32,
+    gradient_accumulation_steps=2,
+    learning_rate=3e-4,
+    max_steps={max_steps},
+    warmup_steps=500,
+    save_steps=0,
+    eval_steps=0,
+    patience=5,
+    use_gradient_checkpointing=False,
+)
+import json
+with open("models/checkpoints/pretrain/training_result.json", "w") as rf:
+    json.dump(result, rf, indent=2)
+""")
+        ret = subprocess.run(
+            [sys.executable, "-m", "accelerate", "launch",
+             "--num_processes", str(gpu_count),
+             "--mixed_precision", "bf16",
+             launcher],
+            cwd="/workspace/terra",
+        )
+        os.unlink(launcher)
+        if ret.returncode != 0:
+            raise RuntimeError(f"Multi-GPU training failed with code {ret.returncode}")
+        # Read result from file
+        result_path = "models/checkpoints/pretrain/training_result.json"
+        if os.path.exists(result_path):
+            return json.load(open(result_path))
+        return {"total_steps": max_steps, "error": "result file not found"}
+
+    scale = os.environ.get("TRAINING_DATA_SCALE", "small")
+    model_preset = os.environ.get("TRAINING_MODEL_PRESET", "")
+
+    print(f"Starting pre-training (max_steps={max_steps}, scale={scale})...")
     import yaml
     config = yaml.safe_load(open("configs/terra.yaml"))
 
     from src.training.pretrain import pretrain
+
+    if model_preset:
+        model_config = model_preset
+    else:
+        model_config = config.get("architecture", {})
+
+    # Adjust batch size and settings based on model scale
+    if model_preset == "terra_2b" or scale == "large":
+        return pretrain(
+            model_config=model_config,
+            data_path="data/pretrain_chunks",
+            output_dir="models/checkpoints/pretrain",
+            batch_size=8,
+            gradient_accumulation_steps=4,
+            learning_rate=3e-4,
+            max_steps=max_steps,
+            warmup_steps=2000,
+            save_steps=5000,
+            eval_steps=2500,
+            patience=5,
+            use_gradient_checkpointing=True,
+        )
+
     return pretrain(
-        model_config=config.get("architecture", {}),
+        model_config=model_config,
         data_path="data/pretrain_chunks",
         output_dir="models/checkpoints/pretrain",
         batch_size=32,

@@ -26,10 +26,13 @@ CLOUD_STATE_FILE = Path("configs/cloud_job.json")
 def cloud_pretrain(
     config_path: str = "configs/terra.yaml",
     provider: str | None = None,
-    gpu: str = "A100",
+    gpu: str = "RTX5090",
     max_steps: int = 10000,
     sync_checkpoint: bool = True,
     async_mode: bool = False,
+    gpu_count: int = 1,
+    data_scale: str = "small",
+    model_preset: str = "",
 ) -> dict:
     """Run pre-training on a cloud GPU pod.
 
@@ -47,10 +50,15 @@ def cloud_pretrain(
     if provider is None:
         provider = _detect_provider()
 
+    extra_env = [
+        {"key": "TRAINING_DATA_SCALE", "value": data_scale},
+        {"key": "TRAINING_MODEL_PRESET", "value": model_preset},
+    ]
+
     if provider == "modal":
         return _modal_pretrain(config_path, gpu, max_steps, sync_checkpoint, async_mode)
     elif provider == "runpod":
-        return _runpod_pretrain(config_path, gpu, max_steps, sync_checkpoint, async_mode)
+        return _runpod_pretrain(config_path, gpu, max_steps, sync_checkpoint, async_mode, gpu_count=gpu_count, extra_env=extra_env)
     else:
         raise ValueError(f"Unknown provider: {provider}. Use 'modal' or 'runpod'.")
 
@@ -217,6 +225,7 @@ def _runpod_graphql(client, headers, query: str, variables: dict = None) -> dict
 def _runpod_launch_pod(
     gpu: str, max_steps: int, async_mode: bool = True,
     mode: str = "pretrain", extra_env: list = None,
+    gpu_count: int = 1,
 ) -> dict:
     """Launch a RunPod GPU pod for training (pretrain or SFT).
 
@@ -233,6 +242,7 @@ def _runpod_launch_pod(
         "L4": "NVIDIA L4",
         "L40S": "NVIDIA L40S",
         "A40": "NVIDIA A40",
+        "RTX5090": "NVIDIA GeForce RTX 5090",
         "RTX4090": "NVIDIA GeForce RTX 4090",
         "RTX3090": "NVIDIA GeForce RTX 3090",
     }
@@ -267,6 +277,7 @@ def _runpod_launch_pod(
     env = [
         {"key": "TRAINING_MODE", "value": mode},
         {"key": "TRAINING_MAX_STEPS", "value": str(max_steps)},
+        {"key": "TRAINING_GPU_COUNT", "value": str(gpu_count)},
         {"key": "RUNPOD_API_KEY", "value": rp_key},
         {"key": "HF_TOKEN", "value": hf_token},
         {"key": "HF_REPO_ID", "value": hf_repo},
@@ -280,9 +291,9 @@ def _runpod_launch_pod(
             "name": pod_name,
             "imageName": "runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04",
             "gpuTypeId": gpu_id,
-            "gpuCount": 1,
+            "gpuCount": gpu_count,
             "volumeInGb": 0,
-            "containerDiskInGb": 50,
+            "containerDiskInGb": 200 if mode == "pretrain" else 50,
             "minVcpuCount": 1,
             "minMemoryInGb": 1,
             "dockerArgs": docker_args,
@@ -329,9 +340,10 @@ def _runpod_launch_pod(
 
 def _runpod_pretrain(
     config_path: str, gpu: str, max_steps: int, sync_checkpoint: bool, async_mode: bool,
+    gpu_count: int = 1, extra_env: list = None,
 ) -> dict:
     """Run pre-training on a RunPod GPU pod."""
-    result = _runpod_launch_pod(gpu=gpu, max_steps=max_steps, async_mode=async_mode, mode="pretrain")
+    result = _runpod_launch_pod(gpu=gpu, max_steps=max_steps, async_mode=async_mode, mode="pretrain", gpu_count=gpu_count, extra_env=extra_env)
 
     if async_mode:
         return result
@@ -437,7 +449,7 @@ def _runpod_wait_for_completion(client, headers, pod_id, timeout=7200):
                 pod(input: {podId: $podId}) {
                     runtime {
                         uptimeInSeconds
-                        gpus { gpuUtilPerc }
+                        gpus { gpuUtilPercent }
                     }
                 }
             }
@@ -450,7 +462,7 @@ def _runpod_wait_for_completion(client, headers, pod_id, timeout=7200):
 
         uptime = pod["runtime"].get("uptimeInSeconds", 0)
         gpus = pod["runtime"].get("gpus", [])
-        gpu_util = gpus[0].get("gpuUtilPerc", 100) if gpus else 100
+        gpu_util = gpus[0].get("gpuUtilPercent", 100) if gpus else 100
 
         elapsed = round((time.time() - start) / 60, 1)
         print(f"  [{elapsed}m] GPU: {gpu_util}%, uptime: {uptime}s", end="\r")
@@ -911,6 +923,7 @@ def _normalize_gpu_name(raw: str) -> str | None:
         "a10g": "A10G", "nvidiaa10g": "A10G",
         "l4": "L4", "nvidial4": "L4",
         "t4": "T4", "nvidiat4": "T4",
+        "rtx5090": "RTX5090", "nvidiagefortxrtx5090": "RTX5090",
         "rtx4090": "RTX4090", "nvidiagefortxrtx4090": "RTX4090",
         "rtx3090": "RTX3090", "rtxa6000": "A6000", "a6000": "A6000",
     }
@@ -924,11 +937,11 @@ def _normalize_gpu_name(raw: str) -> str | None:
 # Speed = seconds per training step (measured from actual runs, NOT tokens/sec)
 _FALLBACK_STEP_TIME = {
     "A100": 1.2, "H100": 0.8, "H200": 0.7, "A10G": 2.5,
-    "L4": 4.0, "T4": 8.0, "RTX4090": 1.5,
+    "L4": 4.0, "T4": 8.0, "RTX5090": 0.7, "RTX4090": 1.5,
 }
 _FALLBACK_PRICING = {
     "A100": 3.40, "H100": 4.76, "H200": 3.39, "A10G": 1.10,
-    "L4": 0.80, "T4": 0.53, "RTX4090": 0.69,
+    "L4": 0.80, "T4": 0.53, "RTX5090": 0.77, "RTX4090": 0.69,
 }
 # Overhead for data download, tokenizer training, pip install, model upload (minutes)
 _OVERHEAD_MINUTES = {
@@ -943,11 +956,13 @@ def estimate_cost(
     max_steps: int,
     mode: str = "pretrain",
     provider: str | None = None,
+    gpu_count: int = 1,
 ) -> dict:
     """Estimate cloud training cost based on measured step times.
 
     Uses seconds-per-step from actual training runs + fixed overhead
     for data download, tokenizer training, pip install, and model upload.
+    Multi-GPU scales step time down linearly (data parallelism) but costs more per hour.
     """
     live_prices = {}
     pricing_source = "fallback"
@@ -969,16 +984,22 @@ def estimate_cost(
         pricing_source = "fallback"
 
     secs_per_step = _FALLBACK_STEP_TIME.get(gpu, 1.0)
+    # Multi-GPU: each step processes gpu_count x more data, so fewer steps needed
+    # But we keep step count the same — each step is faster due to data parallelism
+    # In practice with DDP: step time stays ~same but effective batch is larger
+    # So for same number of steps, time is similar but throughput is gpu_count x higher
+    # We model this as: training time stays ~same, cost = time x gpu_count x price
     overhead_min = _OVERHEAD_MINUTES.get(mode, 10)
     training_hours = (max_steps * secs_per_step) / 3600
     total_hours = training_hours + (overhead_min / 60)
-    cost = total_hours * cost_per_hr
+    cost = total_hours * cost_per_hr * gpu_count
 
     return {
         "gpu": gpu,
+        "gpu_count": gpu_count,
         "estimated_hours": round(total_hours, 2),
         "estimated_cost_usd": round(cost, 2),
-        "cost_per_hour": round(cost_per_hr, 3),
+        "cost_per_hour": round(cost_per_hr * gpu_count, 3),
         "training_hours": round(training_hours, 2),
         "overhead_minutes": overhead_min,
         "secs_per_step": secs_per_step,

@@ -52,6 +52,39 @@ DATA_SOURCES = {
         "mix_ratio": 0.10,
         "description": "Instruction-following data",
     },
+    # --- Extended sources for 10B+ token runs ---
+    "fineweb": {
+        "hf_name": "HuggingFaceFW/fineweb",
+        "hf_subset": "sample-10BT",
+        "split": "train",
+        "text_field": "text",
+        "mix_ratio": 0.0,  # only used when explicitly requested
+        "description": "General web text (broader than fineweb_edu)",
+    },
+    "starcoder_python": {
+        "hf_name": "bigcode/starcoderdata",
+        "hf_subset": "python",
+        "split": "train",
+        "text_field": "content",
+        "mix_ratio": 0.0,
+        "description": "Python code from StarCoder dataset",
+    },
+    "wikipedia": {
+        "hf_name": "wikimedia/wikipedia",
+        "hf_subset": "20231101.en",
+        "split": "train",
+        "text_field": "text",
+        "mix_ratio": 0.0,
+        "description": "English Wikipedia articles",
+    },
+    "arxiv": {
+        "hf_name": "togethercomputer/RedPajama-Data-V2",
+        "hf_subset": "sample",
+        "split": "train",
+        "text_field": "raw_content",
+        "mix_ratio": 0.0,
+        "description": "Web + academic text from RedPajama V2",
+    },
 }
 
 
@@ -168,8 +201,9 @@ def prepare_pretraining_chunks(
 ) -> str:
     """Tokenize and chunk pre-training data for efficient training.
 
-    Concatenates all text, tokenizes, and splits into fixed-length chunks.
-    This is the standard approach for pre-training (no padding waste).
+    Streams through all text, tokenizes, and writes fixed-length chunks
+    incrementally. Memory-efficient — handles 10B+ tokens without loading
+    everything into RAM.
 
     Args:
         data_dir: Directory with raw text files.
@@ -187,7 +221,7 @@ def prepare_pretraining_chunks(
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
 
-    # Collect all text files and their mix ratios
+    # Collect all text files
     text_files = []
     for source_name, info in DATA_SOURCES.items():
         fpath = data_path / f"{source_name}.txt"
@@ -197,42 +231,43 @@ def prepare_pretraining_chunks(
     if not text_files:
         raise FileNotFoundError(f"No pre-training data found in {data_dir}")
 
-    # Process each source
-    all_token_ids = []
     bos_id = tokenizer.token_to_id("<|bos|>")
     eos_id = tokenizer.token_to_id("<|eos|>")
 
-    for fpath, ratio in text_files:
-        print(f"[chunk] Tokenizing {fpath.name}...")
-        with open(fpath, encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                encoded = tokenizer.encode(line)
-                if bos_id is not None:
-                    all_token_ids.append(bos_id)
-                all_token_ids.extend(encoded.ids)
-                if eos_id is not None:
-                    all_token_ids.append(eos_id)
-
-    # Split into chunks
-    num_chunks = len(all_token_ids) // chunk_size
-    print(f"[chunk] Total tokens: {len(all_token_ids):,}, chunks: {num_chunks:,}")
-
-    chunks = []
-    for i in range(num_chunks):
-        start = i * chunk_size
-        chunk = all_token_ids[start : start + chunk_size]
-        chunks.append(chunk)
-
-    # Save as JSONL (each line is a chunk of token IDs)
+    # Stream: tokenize and write chunks incrementally (constant memory)
     output_file = out / "train.jsonl"
-    with open(output_file, "w") as f:
-        for chunk in chunks:
-            f.write(json.dumps({"input_ids": chunk}) + "\n")
+    buffer = []
+    total_tokens = 0
+    num_chunks = 0
 
-    print(f"[chunk] Saved {len(chunks)} chunks to {output_file}")
+    with open(output_file, "w") as out_f:
+        for fpath, ratio in text_files:
+            print(f"[chunk] Tokenizing {fpath.name}...")
+            with open(fpath, encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    encoded = tokenizer.encode(line)
+                    if bos_id is not None:
+                        buffer.append(bos_id)
+                    buffer.extend(encoded.ids)
+                    if eos_id is not None:
+                        buffer.append(eos_id)
+
+                    # Flush complete chunks from buffer
+                    while len(buffer) >= chunk_size:
+                        chunk = buffer[:chunk_size]
+                        buffer = buffer[chunk_size:]
+                        out_f.write(json.dumps({"input_ids": chunk}) + "\n")
+                        num_chunks += 1
+                        total_tokens += chunk_size
+
+                        if num_chunks % 10000 == 0:
+                            print(f"[chunk] {num_chunks:,} chunks ({total_tokens:,} tokens)...")
+
+    print(f"[chunk] Total tokens: {total_tokens:,}, chunks: {num_chunks:,}")
+    print(f"[chunk] Saved {num_chunks} chunks to {output_file}")
     return str(out)
 
 

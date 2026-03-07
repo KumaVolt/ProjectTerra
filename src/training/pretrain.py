@@ -3,6 +3,7 @@
 Supports:
 - Local training on MacBook Air M4 (MPS backend)
 - Cloud GPU bursts via Modal/RunPod
+- Multi-GPU data parallelism via HuggingFace Accelerate
 - Gradient checkpointing for memory efficiency
 - Mixed precision (bfloat16)
 - Cosine LR schedule with warmup
@@ -17,6 +18,12 @@ from pathlib import Path
 
 import torch
 from torch.utils.data import DataLoader, Dataset, random_split
+
+try:
+    from accelerate import Accelerator
+    HAS_ACCELERATE = True
+except ImportError:
+    HAS_ACCELERATE = False
 
 
 class PretrainDataset(Dataset):
@@ -132,8 +139,24 @@ def pretrain(
     """
     from src.training.model import TerraConfig, TerraForCausalLM
 
-    device = get_device()
-    print(f"Device: {device}")
+    # Multi-GPU support via Accelerate
+    use_accelerate = HAS_ACCELERATE and torch.cuda.device_count() > 1
+    accelerator = None
+    if use_accelerate:
+        accelerator = Accelerator(mixed_precision="bf16")
+        device = accelerator.device
+        dtype = torch.bfloat16
+        is_main = accelerator.is_main_process
+        print(f"[accelerate] Using {accelerator.num_processes} GPUs")
+    else:
+        device = get_device()
+        dtype = torch.bfloat16 if device.type in ("cuda", "cpu") else torch.float32
+        if device.type == "mps":
+            dtype = torch.float32  # MPS bfloat16 support is limited
+        is_main = True
+
+    if is_main:
+        print(f"Device: {device}")
 
     # Build model
     if isinstance(model_config, str):
@@ -147,18 +170,15 @@ def pretrain(
 
     model = TerraForCausalLM(config)
     params = model.count_parameters()
-    print(f"Model: {params['total_millions']:.1f}M parameters")
+    if is_main:
+        print(f"Model: {params['total_millions']:.1f}M parameters")
 
     # Gradient checkpointing for memory savings
     if use_gradient_checkpointing:
         _enable_gradient_checkpointing(model)
 
-    model = model.to(device)
-
-    # Use bfloat16 on supported devices
-    dtype = torch.bfloat16 if device.type in ("cuda", "cpu") else torch.float32
-    if device.type == "mps":
-        dtype = torch.float32  # MPS bfloat16 support is limited
+    if not use_accelerate:
+        model = model.to(device)
 
     # Dataset with train/val split
     full_dataset = PretrainDataset(data_path)
@@ -169,24 +189,29 @@ def pretrain(
         generator=torch.Generator().manual_seed(42),
     )
 
-    # Track epochs and auto-calculate max_steps if needed
-    steps_per_epoch = max(1, train_size // (batch_size * gradient_accumulation_steps))
+    # With multi-GPU, effective batch = batch_size * num_gpus * grad_accum
+    num_gpus = accelerator.num_processes if accelerator else 1
+    steps_per_epoch = max(1, train_size // (batch_size * num_gpus * gradient_accumulation_steps))
 
     if max_steps <= 0:
-        # Auto mode: 3 epochs over the data (with early stopping as safety net)
         max_epochs = 3
         max_steps = steps_per_epoch * max_epochs
         warmup_steps = min(warmup_steps, max_steps // 10)
-        print(f"Auto max_steps: {max_steps} ({max_epochs} epochs x {steps_per_epoch} steps/epoch)")
+        if is_main:
+            print(f"Auto max_steps: {max_steps} ({max_epochs} epochs x {steps_per_epoch} steps/epoch)")
 
     total_epochs = max_steps / steps_per_epoch
-    print(f"Data: {train_size} train chunks, {val_size} val chunks")
-    print(f"Steps per epoch: {steps_per_epoch}, total epochs: {total_epochs:.1f}")
+    if is_main:
+        print(f"Data: {train_size} train chunks, {val_size} val chunks")
+        print(f"Steps per epoch: {steps_per_epoch}, total epochs: {total_epochs:.1f}")
+        if num_gpus > 1:
+            print(f"Effective batch size: {batch_size * num_gpus * gradient_accumulation_steps} ({batch_size} x {num_gpus} GPUs x {gradient_accumulation_steps} accum)")
     if total_epochs > 4:
-        print(f"WARNING: {total_epochs:.1f} epochs over the same data. Consider adding more data or reducing max_steps.")
-        # Auto-cap at 4 epochs to prevent overfitting
+        if is_main:
+            print(f"WARNING: {total_epochs:.1f} epochs over the same data. Consider adding more data or reducing max_steps.")
         max_steps = min(max_steps, steps_per_epoch * 4)
-        print(f"Auto-capped max_steps to {max_steps} (4 epochs)")
+        if is_main:
+            print(f"Auto-capped max_steps to {max_steps} (4 epochs)")
 
     # Scale eval/save intervals to data size (eval ~2x per epoch, save ~1x per epoch)
     if eval_steps <= 0 or eval_steps > steps_per_epoch:
@@ -232,6 +257,12 @@ def pretrain(
 
     scheduler = get_cosine_schedule(optimizer, warmup_steps, max_steps)
 
+    # Wrap with accelerate for multi-GPU
+    if accelerator:
+        model, optimizer, train_dataloader, val_dataloader, scheduler = accelerator.prepare(
+            model, optimizer, train_dataloader, val_dataloader, scheduler
+        )
+
     # Resume from checkpoint
     start_step = 0
     best_val_loss = float("inf")
@@ -260,10 +291,12 @@ def pretrain(
 
     data_iter = iter(train_dataloader)
 
-    print(f"Starting pre-training: {max_steps} steps, batch={batch_size}, accum={gradient_accumulation_steps}")
-    print(f"Effective batch size: {batch_size * gradient_accumulation_steps}")
-    if patience > 0:
-        print(f"Early stopping: patience={patience} evals, eval every {eval_steps} steps")
+    if is_main:
+        eff_batch = batch_size * num_gpus * gradient_accumulation_steps
+        print(f"Starting pre-training: {max_steps} steps, batch={batch_size}, accum={gradient_accumulation_steps}")
+        print(f"Effective batch size: {eff_batch}")
+        if patience > 0:
+            print(f"Early stopping: patience={patience} evals, eval every {eval_steps} steps")
 
     while step < max_steps:
         optimizer.zero_grad()
@@ -274,31 +307,42 @@ def pretrain(
                 batch = next(data_iter)
             except StopIteration:
                 epoch += 1
-                print(f"--- Epoch {epoch} complete ---")
+                if is_main:
+                    print(f"--- Epoch {epoch} complete ---")
                 data_iter = iter(train_dataloader)
                 batch = next(data_iter)
 
             input_ids = batch["input_ids"].to(device)
             labels = batch["labels"].to(device)
 
-            with torch.autocast(device_type=device.type, dtype=dtype, enabled=dtype != torch.float32):
+            if accelerator:
+                # Accelerate handles autocast and gradient sync
                 output = model(input_ids=input_ids, labels=labels)
                 loss = output["loss"] / gradient_accumulation_steps
+                accelerator.backward(loss)
+            else:
+                with torch.autocast(device_type=device.type, dtype=dtype, enabled=dtype != torch.float32):
+                    output = model(input_ids=input_ids, labels=labels)
+                    loss = output["loss"] / gradient_accumulation_steps
+                loss.backward()
 
-            loss.backward()
             accum_loss += loss.item()
             tokens_processed += input_ids.numel()
 
         # Gradient clipping
-        grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
+        if accelerator:
+            accelerator.clip_grad_norm_(model.parameters(), max_grad_norm)
+            grad_norm = 0.0  # accelerate doesn't return grad_norm easily
+        else:
+            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
         optimizer.step()
         scheduler.step()
 
         step += 1
         total_loss += accum_loss
 
-        # Logging
-        if step % log_steps == 0:
+        # Logging (main process only)
+        if step % log_steps == 0 and is_main:
             elapsed = time.time() - start_time
             tokens_per_sec = tokens_processed / elapsed
             avg_loss = total_loss / log_steps
@@ -310,55 +354,62 @@ def pretrain(
                 "loss": round(avg_loss, 4),
                 "lr": round(lr, 8),
                 "grad_norm": round(grad_norm.item() if isinstance(grad_norm, torch.Tensor) else grad_norm, 4),
-                "tokens_per_sec": round(tokens_per_sec, 1),
-                "tokens_total": tokens_processed,
+                "tokens_per_sec": round(tokens_per_sec * num_gpus, 1),
+                "tokens_total": tokens_processed * num_gpus,
             }
             log_history.append(log_entry)
             print(
                 f"step {step}/{max_steps} | epoch {epoch} | loss {avg_loss:.4f} | lr {lr:.2e} | "
-                f"grad_norm {log_entry['grad_norm']:.2f} | {tokens_per_sec:.0f} tok/s"
+                f"grad_norm {log_entry['grad_norm']:.2f} | {tokens_per_sec * num_gpus:.0f} tok/s"
             )
             total_loss = 0.0
 
         # Validation + early stopping
         if step % eval_steps == 0:
-            val_loss = evaluate_val_loss(model, val_dataloader, device, dtype)
-            print(f"  val_loss: {val_loss:.4f} (best: {best_val_loss:.4f})")
+            raw_model = accelerator.unwrap_model(model) if accelerator else model
+            val_loss = evaluate_val_loss(raw_model, val_dataloader, device, dtype)
 
-            log_history.append({"step": step, "val_loss": round(val_loss, 4)})
+            if is_main:
+                print(f"  val_loss: {val_loss:.4f} (best: {best_val_loss:.4f})")
+                log_history.append({"step": step, "val_loss": round(val_loss, 4)})
 
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
                 patience_counter = 0
-                # Save best model
-                _save_checkpoint(model, optimizer, scheduler, step, config, out, log_history, best_val_loss)
-                model.save_pretrained(str(out / "best"))
-                print(f"  New best model saved (val_loss: {val_loss:.4f})")
+                if is_main:
+                    _save_checkpoint(raw_model, optimizer, scheduler, step, config, out, log_history, best_val_loss)
+                    raw_model.save_pretrained(str(out / "best"))
+                    print(f"  New best model saved (val_loss: {val_loss:.4f})")
             else:
                 patience_counter += 1
-                print(f"  No improvement ({patience_counter}/{patience})")
+                if is_main:
+                    print(f"  No improvement ({patience_counter}/{patience})")
 
                 if patience > 0 and patience_counter >= patience:
-                    print(f"Early stopping: val_loss hasn't improved for {patience} evals")
+                    if is_main:
+                        print(f"Early stopping: val_loss hasn't improved for {patience} evals")
                     stop_reason = "early_stopping"
                     break
 
-        # Periodic checkpointing
-        elif step % save_steps == 0:
-            _save_checkpoint(model, optimizer, scheduler, step, config, out, log_history, best_val_loss)
+        # Periodic checkpointing (main process only)
+        elif step % save_steps == 0 and is_main:
+            raw_model = accelerator.unwrap_model(model) if accelerator else model
+            _save_checkpoint(raw_model, optimizer, scheduler, step, config, out, log_history, best_val_loss)
 
-    # Final save
-    _save_checkpoint(model, optimizer, scheduler, step, config, out, log_history, best_val_loss)
-    model.save_pretrained(str(out / "final"))
+    # Final save (main process only)
+    raw_model = accelerator.unwrap_model(model) if accelerator else model
+    if is_main:
+        _save_checkpoint(raw_model, optimizer, scheduler, step, config, out, log_history, best_val_loss)
+        raw_model.save_pretrained(str(out / "final"))
 
-    # Copy best model as the "final" if early stopping triggered
-    best_dir = out / "best"
-    if stop_reason == "early_stopping" and best_dir.exists():
-        import shutil
-        final_dir = out / "final"
-        shutil.rmtree(final_dir, ignore_errors=True)
-        shutil.copytree(best_dir, final_dir)
-        print("Using best checkpoint as final model (early stopping)")
+        # Copy best model as the "final" if early stopping triggered
+        best_dir = out / "best"
+        if stop_reason == "early_stopping" and best_dir.exists():
+            import shutil
+            final_dir = out / "final"
+            shutil.rmtree(final_dir, ignore_errors=True)
+            shutil.copytree(best_dir, final_dir)
+            print("Using best checkpoint as final model (early stopping)")
 
     elapsed = time.time() - start_time
     result = {
@@ -367,15 +418,17 @@ def pretrain(
         "final_loss": log_history[-1].get("loss", log_history[-2].get("loss")) if len(log_history) >= 2 else None,
         "best_val_loss": round(best_val_loss, 4) if best_val_loss < float("inf") else None,
         "stop_reason": stop_reason,
-        "total_tokens": tokens_processed,
+        "total_tokens": tokens_processed * num_gpus,
         "training_time_seconds": round(elapsed, 1),
-        "tokens_per_second": round(tokens_processed / elapsed, 1) if elapsed > 0 else 0,
+        "tokens_per_second": round(tokens_processed * num_gpus / elapsed, 1) if elapsed > 0 else 0,
         "model_path": str(out / "final"),
         "parameter_count": params["total"],
+        "num_gpus": num_gpus,
     }
 
-    (out / "training_result.json").write_text(json.dumps(result, indent=2))
-    print(f"\nPre-training complete: {result}")
+    if is_main:
+        (out / "training_result.json").write_text(json.dumps(result, indent=2))
+        print(f"\nPre-training complete: {result}")
     return result
 
 

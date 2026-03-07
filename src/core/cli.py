@@ -161,12 +161,15 @@ def pretrain(
 def cloud_train(
     config: str = typer.Option("configs/terra.yaml", help="Path to config file"),
     provider: str = typer.Option(None, help="Cloud provider: 'modal' or 'runpod' (auto-detects)"),
-    gpu: str = typer.Option("A100", help="GPU type: A100, H100, A10G, L4, T4, RTX4090"),
+    gpu: str = typer.Option("RTX5090", help="GPU type: RTX5090, A100, H100, L4, RTX4090"),
+    gpu_count: int = typer.Option(1, "--gpu-count", help="Number of GPUs (multi-GPU data parallelism)"),
     max_steps: int = typer.Option(0, help="Training steps (0 = auto based on data size)"),
+    data_scale: str = typer.Option("small", "--data-scale", help="Data scale: 'small' (~250M tokens) or 'large' (~10B tokens)"),
+    model_preset: str = typer.Option("", "--model", help="Model preset: terra_150m, terra_2b, etc. (default: from config)"),
     estimate_only: bool = typer.Option(False, "--estimate", help="Only show cost estimate"),
-    async_mode: bool = typer.Option(False, "--async", help="Fire-and-forget (safe to close laptop)"),
+    async_mode: bool = typer.Option(True, "--async/--sync", help="Async mode (safe to close laptop)"),
 ):
-    """Pre-train on a cloud GPU. Creates pod, trains, downloads results, destroys pod."""
+    """Pre-train on a cloud GPU. Creates pod, trains, uploads to HF, self-destructs."""
     from src.training.cloud import cloud_pretrain, estimate_cost
 
     # For auto mode, calculate steps from data to show meaningful estimate
@@ -184,7 +187,7 @@ def cloud_train(
             display_steps = 1000  # rough fallback
             console.print("[yellow]No local data found to calculate steps. Using estimate of ~1000 steps.[/yellow]")
 
-    est = estimate_cost(gpu, display_steps, mode="pretrain", provider=provider)
+    est = estimate_cost(gpu, display_steps, mode="pretrain", provider=provider, gpu_count=gpu_count)
     source = est['pricing_source']
     source_label = {
         "runpod_api": "[green]live from RunPod API[/green]",
@@ -193,11 +196,10 @@ def cloud_train(
     }.get(source, source)
 
     console.print(f"[bold]Cloud training estimate:[/bold]")
-    console.print(f"  GPU: {est['gpu']}")
+    console.print(f"  GPU: {est['gpu']} x{gpu_count}" if gpu_count > 1 else f"  GPU: {est['gpu']}")
     console.print(f"  Rate: ${est['cost_per_hour']}/hr ({source_label})")
     console.print(f"  Time: ~{est['estimated_hours']} hours")
     console.print(f"  Cost: ~${est['estimated_cost_usd']:.2f}")
-    console.print(f"  Tokens: {est['total_tokens']:,}")
     if max_steps <= 0:
         console.print(f"  Steps: [cyan]auto ({display_steps}, with early stopping)[/cyan]")
     if async_mode:
@@ -210,7 +212,7 @@ def cloud_train(
         console.print("Cancelled.")
         return
 
-    result = cloud_pretrain(config, provider=provider, gpu=gpu, max_steps=max_steps, async_mode=async_mode)
+    result = cloud_pretrain(config, provider=provider, gpu=gpu, max_steps=max_steps, async_mode=async_mode, gpu_count=gpu_count, data_scale=data_scale, model_preset=model_preset)
 
     if async_mode:
         console.print(f"\n[bold green]Job submitted![/bold green]")
@@ -224,7 +226,7 @@ def cloud_train(
 
 @app.command()
 def cloud_sft(
-    gpu: str = typer.Option("A100", help="GPU type: A100, H100, L4, RTX4090"),
+    gpu: str = typer.Option("RTX5090", help="GPU type: RTX5090, A100, H100, L4, RTX4090"),
     max_steps: int = typer.Option(0, help="Training steps (0 = auto, 3 epochs)"),
     max_samples: int = typer.Option(20000, help="Max SFT training samples"),
     estimate_only: bool = typer.Option(False, "--estimate", help="Only show cost estimate"),
@@ -967,7 +969,7 @@ def train_multimodal(
 
 @app.command()
 def cloud_multimodal(
-    gpu: str = typer.Option("A100", help="GPU type: A100, H100, L4, RTX4090"),
+    gpu: str = typer.Option("RTX5090", help="GPU type: RTX5090, A100, H100, L4, RTX4090"),
     max_steps: int = typer.Option(0, help="Training steps (0 = auto, 10K)"),
     estimate_only: bool = typer.Option(False, "--estimate", help="Only show cost estimate"),
     async_mode: bool = typer.Option(True, "--async/--sync", help="Async mode (safe to close laptop)"),
